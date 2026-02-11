@@ -62,14 +62,11 @@ def test_micromanager_source_uses_metadata_timestamp_and_detects_duplicate_by_to
     class _TaggedImage:
         def __init__(self, pix, elapsed_ms):
             self.pix = pix
-            self.tags = {"ElapsedTime-ms": elapsed_ms}
+            self.tags = {"ElapsedTime-ms": elapsed_ms, "ImageNumber": 1}
 
     class _LiveCoreWithToken:
         def __init__(self):
             self.token = 1
-
-        def isSequenceRunning(self):
-            return True
 
         def getLastImageTimeStamp(self):
             return self.token
@@ -77,7 +74,9 @@ def test_micromanager_source_uses_metadata_timestamp_and_detects_duplicate_by_to
         def getLastTaggedImage(self):
             if self.token == 1:
                 return _TaggedImage([[10, 20], [30, 40]], 1250.0)
-            return _TaggedImage([[11, 22], [33, 44]], 1500.0)
+            tagged = _TaggedImage([[11, 22], [33, 44]], 1500.0)
+            tagged.tags["ImageNumber"] = 2
+            return tagged
 
     core = _LiveCoreWithToken()
     source = MicroManagerFrameSource(core)
@@ -86,22 +85,45 @@ def test_micromanager_source_uses_metadata_timestamp_and_detects_duplicate_by_to
     assert image1 == [[10.0, 20.0], [30.0, 40.0]]
     assert ts1 == pytest.approx(1.25)
 
-    # Same token means no new acquisition frame.
+    # Same token + same frame identity => duplicate.
     image2, ts2 = source()
     assert ts2 == ts1
     assert image2 == image1
 
-    # Advance core token to simulate a truly new frame.
+    # Advance token => new frame.
     core.token = 2
     image3, ts3 = source()
     assert image3 == [[11.0, 22.0], [33.0, 44.0]]
     assert ts3 == pytest.approx(1.5)
 
 
+def test_micromanager_source_uses_identity_when_token_stuck():
+    class _TaggedImage:
+        def __init__(self, i):
+            self.pix = [[i]]
+            self.tags = {"ElapsedTime-ms": 1000 + i, "ImageNumber": i}
+
+    class _Core:
+        def __init__(self):
+            self.i = 0
+
+        def getLastImageTimeStamp(self):
+            return 1  # stuck token
+
+        def getLastTaggedImage(self):
+            self.i += 1
+            return _TaggedImage(self.i)
+
+    source = MicroManagerFrameSource(_Core())
+    image1, ts1 = source()
+    image2, ts2 = source()
+    assert image1 != image2
+    assert ts2 > ts1
+
+
 def test_micromanager_source_requires_live_mode_by_default():
     class _CoreNotLive:
-        def isSequenceRunning(self):
-            return False
+        pass
 
     source = MicroManagerFrameSource(_CoreNotLive())
     with pytest.raises(RuntimeError, match="not running"):
@@ -110,9 +132,6 @@ def test_micromanager_source_requires_live_mode_by_default():
 
 def test_micromanager_source_snap_fallback_is_opt_in():
     class _CoreNotLive:
-        def isSequenceRunning(self):
-            return False
-
         def snapImage(self):
             return None
 
@@ -122,6 +141,16 @@ def test_micromanager_source_snap_fallback_is_opt_in():
     source = MicroManagerFrameSource(_CoreNotLive(), allow_snap_fallback=True)
     image, ts = source()
     assert image == [[1.0, 2.0], [3.0, 4.0]]
+    assert ts > 0
+
+
+def test_micromanager_source_without_explicit_timestamp_uses_monotonic():
+    class _Core:
+        def getLastImage(self):
+            return [[1, 1], [1, 1]]
+
+    source = MicroManagerFrameSource(_Core())
+    _, ts = source()
     assert ts > 0
 
 
@@ -148,57 +177,3 @@ def test_micromanager_stage_wait_for_device_is_optional():
     stage.move_z_um(2.5)
     assert stage.get_z_um() == pytest.approx(2.5)
     assert core.wait_calls == 0
-
-
-def test_micromanager_live_detects_buffered_frames_without_sequence_flag():
-    class _Core:
-        def isSequenceRunning(self):
-            return False
-
-        def getRemainingImageCount(self):
-            return 1
-
-        def getLastImageTimeStamp(self):
-            return 1
-
-        def getLastTaggedImage(self):
-            return {"pix": [[7, 8], [9, 10]], "tags": {"ElapsedTime-ms": 20.0}}
-
-    source = MicroManagerFrameSource(_Core())
-    image, ts = source()
-    assert image == [[7.0, 8.0], [9.0, 10.0]]
-    assert ts == pytest.approx(0.02)
-
-
-def test_micromanager_timestamp_normalization_for_core_fallback():
-    class _Core:
-        def isSequenceRunning(self):
-            return True
-
-        def getLastImageTimeStamp(self):
-            return 2_500_000.0
-
-        def getLastImage(self):
-            return [[1, 1], [1, 1]]
-
-    source = MicroManagerFrameSource(_Core())
-    _, ts = source()
-    assert ts == pytest.approx(2500.0)
-
-
-def test_micromanager_no_frame_token_still_reads_latest_each_call():
-    class _Core:
-        def __init__(self):
-            self.v = 0
-
-        def isSequenceRunning(self):
-            return True
-
-        def getLastImage(self):
-            self.v += 1
-            return [[self.v]]
-
-    source = MicroManagerFrameSource(_Core())
-    image1, _ = source()
-    image2, _ = source()
-    assert image1 != image2
