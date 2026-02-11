@@ -1,3 +1,4 @@
+import pytest
 import time
 
 from orca_focus.autofocus import AstigmaticAutofocusController, AutofocusConfig, AutofocusWorker
@@ -237,3 +238,19 @@ def test_controller_skips_duplicate_frames() -> None:
 
     s3 = controller.run_step()
     assert s3.control_applied is True  # new timestamp → processed
+
+
+def test_controller_rejects_invalid_loop_hz() -> None:
+    stage = MclNanoZStage()
+    camera = SimulatedCamera(stage=stage)
+    camera.start()
+
+    with pytest.raises(ValueError, match="loop_hz must be > 0"):
+        AstigmaticAutofocusController(
+            camera=camera,
+            stage=stage,
+            config=AutofocusConfig(roi=Roi(x=20, y=20, width=24, height=24), loop_hz=0.0),
+            calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
+        )
+
+    camera.stop()
