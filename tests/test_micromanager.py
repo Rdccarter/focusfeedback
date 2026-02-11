@@ -3,7 +3,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from orca_focus.micromanager import create_micromanager_frame_source
+from orca_focus.micromanager import MicroManagerFrameSource, MicroManagerStage, create_micromanager_frame_source
 
 
 class _FakeCore:
@@ -58,40 +58,147 @@ def test_micromanager_source_errors_with_clear_message(monkeypatch):
         create_micromanager_frame_source(host="localhost", port=4827)
 
 
-def test_micromanager_source_returns_stale_timestamp_when_buffer_empty():
-    """When the circular buffer has no new frames, the source should return
-    the previous timestamp so the controller can detect a duplicate."""
-    from orca_focus.micromanager import MicroManagerFrameSource
+def test_micromanager_source_uses_metadata_timestamp_and_detects_duplicate_by_token():
+    class _TaggedImage:
+        def __init__(self, pix, elapsed_ms):
+            self.pix = pix
+            self.tags = {"ElapsedTime-ms": elapsed_ms}
 
-    class _LiveCoreWithBuffer:
+    class _LiveCoreWithToken:
         def __init__(self):
-            self.remaining = 1  # starts with one frame available
+            self.token = 1
 
         def isSequenceRunning(self):
             return True
 
-        def getRemainingImageCount(self):
-            return self.remaining
+        def getLastImageTimeStamp(self):
+            return self.token
 
-        def getLastImage(self):
-            return [[10, 20], [30, 40]]
+        def getLastTaggedImage(self):
+            if self.token == 1:
+                return _TaggedImage([[10, 20], [30, 40]], 1250.0)
+            return _TaggedImage([[11, 22], [33, 44]], 1500.0)
 
-    core = _LiveCoreWithBuffer()
+    core = _LiveCoreWithToken()
     source = MicroManagerFrameSource(core)
 
-    # First call: buffer has a frame → fresh timestamp
     image1, ts1 = source()
-    assert ts1 > 0
+    assert image1 == [[10.0, 20.0], [30.0, 40.0]]
+    assert ts1 == pytest.approx(1.25)
 
-    # Drain the buffer
-    core.remaining = 0
-
-    # Second call: buffer empty → same timestamp returned
+    # Same token means no new acquisition frame.
     image2, ts2 = source()
     assert ts2 == ts1
     assert image2 == image1
 
-    # New frame arrives
-    core.remaining = 1
+    # Advance core token to simulate a truly new frame.
+    core.token = 2
     image3, ts3 = source()
-    assert ts3 > ts1
+    assert image3 == [[11.0, 22.0], [33.0, 44.0]]
+    assert ts3 == pytest.approx(1.5)
+
+
+def test_micromanager_source_requires_live_mode_by_default():
+    class _CoreNotLive:
+        def isSequenceRunning(self):
+            return False
+
+    source = MicroManagerFrameSource(_CoreNotLive())
+    with pytest.raises(RuntimeError, match="not running"):
+        source()
+
+
+def test_micromanager_source_snap_fallback_is_opt_in():
+    class _CoreNotLive:
+        def isSequenceRunning(self):
+            return False
+
+        def snapImage(self):
+            return None
+
+        def getImage(self):
+            return [[1, 2], [3, 4]]
+
+    source = MicroManagerFrameSource(_CoreNotLive(), allow_snap_fallback=True)
+    image, ts = source()
+    assert image == [[1.0, 2.0], [3.0, 4.0]]
+    assert ts > 0
+
+
+def test_micromanager_stage_wait_for_device_is_optional():
+    class _Core:
+        def __init__(self):
+            self.wait_calls = 0
+            self.position = 0.0
+
+        def getFocusDevice(self):
+            return "Z"
+
+        def getPosition(self, _name):
+            return self.position
+
+        def setPosition(self, _name, z):
+            self.position = z
+
+        def waitForDevice(self, _name):
+            self.wait_calls += 1
+
+    core = _Core()
+    stage = MicroManagerStage(core=core, wait_for_device=False)
+    stage.move_z_um(2.5)
+    assert stage.get_z_um() == pytest.approx(2.5)
+    assert core.wait_calls == 0
+
+
+def test_micromanager_live_detects_buffered_frames_without_sequence_flag():
+    class _Core:
+        def isSequenceRunning(self):
+            return False
+
+        def getRemainingImageCount(self):
+            return 1
+
+        def getLastImageTimeStamp(self):
+            return 1
+
+        def getLastTaggedImage(self):
+            return {"pix": [[7, 8], [9, 10]], "tags": {"ElapsedTime-ms": 20.0}}
+
+    source = MicroManagerFrameSource(_Core())
+    image, ts = source()
+    assert image == [[7.0, 8.0], [9.0, 10.0]]
+    assert ts == pytest.approx(0.02)
+
+
+def test_micromanager_timestamp_normalization_for_core_fallback():
+    class _Core:
+        def isSequenceRunning(self):
+            return True
+
+        def getLastImageTimeStamp(self):
+            return 2_500_000.0
+
+        def getLastImage(self):
+            return [[1, 1], [1, 1]]
+
+    source = MicroManagerFrameSource(_Core())
+    _, ts = source()
+    assert ts == pytest.approx(2500.0)
+
+
+def test_micromanager_no_frame_token_still_reads_latest_each_call():
+    class _Core:
+        def __init__(self):
+            self.v = 0
+
+        def isSequenceRunning(self):
+            return True
+
+        def getLastImage(self):
+            self.v += 1
+            return [[self.v]]
+
+    source = MicroManagerFrameSource(_Core())
+    image1, _ = source()
+    image2, _ = source()
+    assert image1 != image2
