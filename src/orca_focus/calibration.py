@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import csv
+from dataclasses import dataclass
+from pathlib import Path
+
+from .focus_metric import Roi, astigmatic_error_signal, roi_total_intensity
+from .interfaces import CameraInterface, StageInterface
+
+
+@dataclass(slots=True)
+class FocusCalibration:
+    """Maps astigmatic error to physical Z offset.
+
+    The mapping follows a local linear approximation around focus:
+    z_offset_um ~= error_to_um * (error - error_at_focus)
+    """
+
+    error_at_focus: float
+    error_to_um: float
+
+    def error_to_z_offset_um(self, error: float) -> float:
+        return (error - self.error_at_focus) * self.error_to_um
+
+
+@dataclass(slots=True)
+class CalibrationSample:
+    z_um: float
+    error: float
+    weight: float = 1.0
+
+
+@dataclass(slots=True)
+class CalibrationFitReport:
+    calibration: FocusCalibration
+    intercept_um: float
+    r2: float
+    rmse_um: float
+    n_samples: int
+    n_inliers: int
+    robust: bool
+
+
+def _weighted_linear_fit(samples: list[CalibrationSample]) -> tuple[float, float]:
+    if len(samples) < 2:
+        raise ValueError("Need at least two calibration samples")
+
+    sum_w = sum(max(0.0, s.weight) for s in samples)
+    if sum_w <= 0:
+        raise ValueError("Calibration sample weights must contain positive mass")
+
+    sum_e = sum(max(0.0, s.weight) * s.error for s in samples)
+    sum_z = sum(max(0.0, s.weight) * s.z_um for s in samples)
+    sum_ee = sum(max(0.0, s.weight) * s.error * s.error for s in samples)
+    sum_ez = sum(max(0.0, s.weight) * s.error * s.z_um for s in samples)
+
+    denom = sum_w * sum_ee - sum_e * sum_e
+    if denom == 0.0:
+        raise ValueError("Calibration samples are degenerate")
+
+    slope = (sum_w * sum_ez - sum_e * sum_z) / denom
+    intercept = (sum_z - slope * sum_e) / sum_w
+    if slope == 0.0:
+        raise ValueError("Calibration slope is zero")
+    return slope, intercept
+
+
+def _robust_seed_fit(samples: list[CalibrationSample]) -> tuple[float, float]:
+    if len(samples) < 2:
+        raise ValueError("Need at least two calibration samples")
+
+    best: tuple[float, float] | None = None
+    best_med = float("inf")
+    for i in range(len(samples)):
+        for j in range(i + 1, len(samples)):
+            e0 = samples[i].error
+            e1 = samples[j].error
+            if e1 == e0:
+                continue
+            slope = (samples[j].z_um - samples[i].z_um) / (e1 - e0)
+            if slope == 0.0:
+                continue
+            intercept = samples[i].z_um - slope * e0
+            residuals = [abs(s.z_um - (slope * s.error + intercept)) for s in samples]
+            residuals.sort()
+            med = residuals[len(residuals) // 2]
+            if med < best_med:
+                best_med = med
+                best = (slope, intercept)
+    if best is None:
+        return _weighted_linear_fit(samples)
+    return best
+
+
+def _fit_report(
+    samples: list[CalibrationSample],
+    slope: float,
+    intercept: float,
+    *,
+    robust: bool,
+    n_inliers: int,
+    metric_samples: list[CalibrationSample] | None = None,
+) -> CalibrationFitReport:
+    error_at_focus = -intercept / slope
+    cal = FocusCalibration(error_at_focus=error_at_focus, error_to_um=slope)
+
+    metric_samples = samples if metric_samples is None else metric_samples
+    weights = [max(0.0, s.weight) for s in metric_samples]
+    w_sum = sum(weights)
+    if w_sum <= 0:
+        raise ValueError("Calibration sample weights must contain positive mass")
+
+    z_mean = sum(w * s.z_um for w, s in zip(weights, metric_samples)) / w_sum
+    ss_res = 0.0
+    ss_tot = 0.0
+    for w, s in zip(weights, metric_samples):
+        pred = slope * s.error + intercept
+        ss_res += w * ((s.z_um - pred) ** 2)
+        ss_tot += w * ((s.z_um - z_mean) ** 2)
+    r2 = 1.0 if ss_tot == 0 else 1.0 - (ss_res / ss_tot)
+    rmse = (ss_res / w_sum) ** 0.5
+
+    return CalibrationFitReport(
+        calibration=cal,
+        intercept_um=intercept,
+        r2=r2,
+        rmse_um=rmse,
+        n_samples=len(samples),
+        n_inliers=n_inliers,
+        robust=robust,
+    )
+
+
+def fit_linear_calibration_with_report(
+    samples: list[CalibrationSample],
+    *,
+    robust: bool = False,
+    outlier_threshold_um: float = 0.2,
+) -> CalibrationFitReport:
+    """Fit z = slope*error + intercept and return quality metrics."""
+
+    slope, intercept = _weighted_linear_fit(samples)
+    n_inliers = len(samples)
+
+    if robust:
+        seed_slope, seed_intercept = _robust_seed_fit(samples)
+        inliers: list[CalibrationSample] = []
+        for s in samples:
+            pred = seed_slope * s.error + seed_intercept
+            if abs(s.z_um - pred) <= outlier_threshold_um:
+                inliers.append(s)
+        if len(inliers) >= 2:
+            slope, intercept = _weighted_linear_fit(inliers)
+            n_inliers = len(inliers)
+
+    metric_samples = samples
+    if robust and n_inliers < len(samples):
+        seed_slope, seed_intercept = _robust_seed_fit(samples)
+        metric_samples = [
+            s
+            for s in samples
+            if abs(s.z_um - (seed_slope * s.error + seed_intercept)) <= outlier_threshold_um
+        ]
+        if len(metric_samples) < 2:
+            metric_samples = samples
+
+    return _fit_report(
+        samples,
+        slope,
+        intercept,
+        robust=robust,
+        n_inliers=n_inliers,
+        metric_samples=metric_samples,
+    )
+
+
+def fit_linear_calibration(
+    samples: list[CalibrationSample],
+    *,
+    robust: bool = False,
+    outlier_threshold_um: float = 0.2,
+) -> FocusCalibration:
+    """Fit z = slope*error + intercept via weighted ordinary least squares."""
+
+    report = fit_linear_calibration_with_report(
+        samples,
+        robust=robust,
+        outlier_threshold_um=outlier_threshold_um,
+    )
+    return report.calibration
+
+
+def auto_calibrate(
+    camera: CameraInterface,
+    stage: StageInterface,
+    roi: Roi,
+    *,
+    z_min_um: float,
+    z_max_um: float,
+    n_steps: int,
+) -> list[CalibrationSample]:
+    """Collect calibration samples from a deterministic stage sweep."""
+
+    if n_steps < 2:
+        raise ValueError("n_steps must be at least 2")
+    if z_max_um <= z_min_um:
+        raise ValueError("z_max_um must be greater than z_min_um")
+
+    step = (z_max_um - z_min_um) / float(n_steps - 1)
+    out: list[CalibrationSample] = []
+    for i in range(n_steps):
+        z = z_min_um + i * step
+        stage.move_z_um(z)
+        frame = camera.get_frame()
+        err = astigmatic_error_signal(frame.image, roi)
+        weight = roi_total_intensity(frame.image, roi)
+        out.append(CalibrationSample(z_um=z, error=err, weight=max(0.0, weight)))
+    return out
+
+
+def save_calibration_samples_csv(path: str | Path, samples: list[CalibrationSample]) -> None:
+    """Write calibration sweep samples for later GUI/model reuse."""
+
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["z_um", "error", "weight"])
+        writer.writeheader()
+        for s in samples:
+            writer.writerow({"z_um": s.z_um, "error": s.error, "weight": s.weight})
+
+
+def load_calibration_samples_csv(path: str | Path) -> list[CalibrationSample]:
+    """Read calibration sweep samples previously exported from the GUI."""
+
+    in_path = Path(path)
+    with in_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        out: list[CalibrationSample] = []
+        for row in reader:
+            out.append(
+                CalibrationSample(
+                    z_um=float(row["z_um"]),
+                    error=float(row["error"]),
+                    weight=float(row.get("weight", "1.0")),
+                )
+            )
+    return out
+
+
+def validate_calibration_sign(
+    calibration: FocusCalibration,
+    *,
+    expected_positive_slope: bool = True,
+) -> None:
+    """Raise if fitted slope sign does not match the expected setup convention."""
+
+    if expected_positive_slope and calibration.error_to_um <= 0:
+        raise ValueError("Calibration slope sign is inverted for expected-positive setup")
+    if (not expected_positive_slope) and calibration.error_to_um >= 0:
+        raise ValueError("Calibration slope sign is inverted for expected-negative setup")
