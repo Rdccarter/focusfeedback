@@ -62,6 +62,7 @@ class AstigmaticAutofocusController:
         self._camera = camera
         self._stage = stage
         self._config = config
+        self._validate_config()
         self._calibration = calibration
         self._integral_um = initial_integral_um
         self._filtered_error_um: float | None = None
@@ -78,6 +79,18 @@ class AstigmaticAutofocusController:
     @calibration.setter
     def calibration(self, value: FocusCalibration) -> None:
         self._calibration = value
+
+    def _validate_config(self) -> None:
+        if self._config.loop_hz <= 0:
+            raise ValueError("loop_hz must be > 0")
+        if self._config.max_step_um < 0:
+            raise ValueError("max_step_um must be >= 0")
+        if self._config.integral_limit_um < 0:
+            raise ValueError("integral_limit_um must be >= 0")
+        if not 0.0 <= self._config.error_alpha <= 1.0:
+            raise ValueError("error_alpha must be in [0.0, 1.0]")
+        if self._config.edge_margin_px < 0:
+            raise ValueError("edge_margin_px must be >= 0")
 
     def _apply_limits(self, target_z_um: float) -> float:
         if self._config.stage_min_um is not None:
