@@ -18,6 +18,9 @@ Typical usage:
 
 from __future__ import annotations
 
+import sys
+import threading
+import time
 from typing import Any
 
 from .dcam import _to_image_2d
@@ -37,6 +40,7 @@ class MicroManagerFrameSource:
         self._last_image: Image2D | None = None
         self._last_ts: float = 0.0
         self._last_frame_token: int | float | str | None = None
+        self._lock = threading.Lock()
 
     @property
     def core(self) -> Any:
@@ -51,36 +55,37 @@ class MicroManagerFrameSource:
         pass
 
     def __call__(self) -> tuple[Image2D, float]:
-        core = self._core
+        with self._lock:
+            core = self._core
 
-        if _is_live(core):
-            token = _get_frame_token(core)
-            if self._last_image is not None and token is not None and token == self._last_frame_token:
-                return self._last_image, self._last_ts
+            if _is_live(core):
+                token = _get_frame_token(core)
+                if self._last_image is not None and token is not None and token == self._last_frame_token:
+                    return self._last_image, self._last_ts
 
-            frame = _get_last_image(core)
-            timestamp_s = _extract_frame_timestamp_s(core, frame)
-            image = _to_image_2d(_extract_image_payload(frame))
+                frame = _get_last_image(core)
+                timestamp_s = _extract_frame_timestamp_s(core, frame)
+                image = _to_image_2d(_extract_image_payload(frame))
 
-            self._last_frame_token = token
+                self._last_frame_token = token
+                self._last_image = image
+                self._last_ts = timestamp_s
+                return image, timestamp_s
+
+            if not self._allow_snap_fallback:
+                raise RuntimeError(
+                    "Micro-Manager sequence/live mode is not running. Enable Live mode in "
+                    "Micro-Manager or construct the frame source with allow_snap_fallback=True."
+                )
+
+            core.snapImage()
+            frame = core.getImage()
+            image = _to_image_2d(frame)
+            timestamp_s = time.monotonic()
             self._last_image = image
             self._last_ts = timestamp_s
+            self._last_frame_token = None
             return image, timestamp_s
-
-        if not self._allow_snap_fallback:
-            raise RuntimeError(
-                "Micro-Manager sequence is not running. Enable Live mode in Micro-Manager "
-                "or construct the frame source with allow_snap_fallback=True."
-            )
-
-        core.snapImage()
-        frame = core.getImage()
-        image = _to_image_2d(frame)
-        timestamp_s = self._last_ts + 1e-6 if self._last_ts > 0 else 1e-6
-        self._last_image = image
-        self._last_ts = timestamp_s
-        self._last_frame_token = None
-        return image, timestamp_s
 
 
 class MicroManagerStage(StageInterface):
@@ -111,35 +116,34 @@ class MicroManagerStage(StageInterface):
 
 
 def _is_live(core: Any) -> bool:
-    """Check if Micro-Manager is currently in live/continuous acquisition."""
+    """Check if Micro-Manager has live/sequence frames available."""
     try:
-        return bool(core.isSequenceRunning())
+        if bool(core.isSequenceRunning()):
+            return True
     except Exception:
-        return False
-
-
-def _get_frame_token(core: Any) -> int | float | str | None:
-    """Best-effort monotonically changing frame token from MMCore.
-
-    Preferred order:
-    1) getLastImageTimeStamp() when available (acquisition-tied)
-    2) getImageCount() / getRemainingImageCount() as weaker fallbacks
-    """
-    for attr in ("getLastImageTimeStamp", "getImageCount"):
-        fn = getattr(core, attr, None)
-        if callable(fn):
-            try:
-                return fn()
-            except Exception:
-                pass
+        pass
 
     fn = getattr(core, "getRemainingImageCount", None)
     if callable(fn):
         try:
-            return int(fn())
+            return int(fn()) > 0
         except Exception:
             pass
+    return False
 
+
+def _get_frame_token(core: Any) -> int | float | str | None:
+    """Return acquisition token for duplicate detection in live mode.
+
+    We only use `getLastImageTimeStamp` because it tracks latest acquired
+    frame identity in live acquisition across common MM backends.
+    """
+    fn = getattr(core, "getLastImageTimeStamp", None)
+    if callable(fn):
+        try:
+            return fn()
+        except Exception:
+            pass
     return None
 
 
@@ -153,9 +157,25 @@ def _extract_image_payload(frame: Any) -> Any:
     return frame
 
 
+def _normalize_mm_timestamp_seconds(value: float) -> float:
+    """Normalize MM timestamp-like values to seconds.
+
+    Metadata keys like `ElapsedTime-ms` are explicit and converted upstream.
+    This helper is only for MM APIs where the unit can vary by backend.
+    Conservative heuristic:
+    - values above 1e6 are treated as milliseconds and divided by 1000.
+    - smaller values are assumed already in seconds.
+    """
+    if value > 1e6:
+        return value / 1000.0
+    return value
+
+
 def _extract_frame_timestamp_s(core: Any, frame: Any) -> float:
     """Extract acquisition timestamp (seconds) from metadata if available."""
     tags = getattr(frame, "tags", None)
+    if tags is None and isinstance(frame, dict):
+        tags = frame.get("tags")
     if isinstance(tags, dict):
         for key in ("ElapsedTime-ms", "ElapsedTimeMs", "Timestamp-ms"):
             if key in tags:
@@ -165,6 +185,8 @@ def _extract_frame_timestamp_s(core: Any, frame: Any) -> float:
                     pass
 
     metadata = getattr(frame, "metadata", None)
+    if metadata is None and isinstance(frame, dict):
+        metadata = frame.get("metadata")
     if isinstance(metadata, dict):
         for key in ("ElapsedTime-ms", "ElapsedTimeMs", "Timestamp-ms"):
             if key in metadata:
@@ -176,7 +198,7 @@ def _extract_frame_timestamp_s(core: Any, frame: Any) -> float:
     fn = getattr(core, "getLastImageTimeStamp", None)
     if callable(fn):
         try:
-            return float(fn()) / 1000.0
+            return _normalize_mm_timestamp_seconds(float(fn()))
         except Exception:
             pass
 
@@ -232,7 +254,7 @@ def create_micromanager_frame_source(
     1. Existing core object passed directly
     2. pycromanager Core(host, port)
     3. pycromanager Core() with default bridge settings
-    4. MMCorePy (direct, if running in the same process)
+    4. MMCorePy (direct core object; does not auto-attach to GUI session)
     """
 
     if core is not None:
@@ -247,6 +269,11 @@ def create_micromanager_frame_source(
         import MMCorePy
 
         mm_core = MMCorePy.CMMCore()
+        print(
+            "Warning: using bare MMCorePy.CMMCore(); this core is not attached to a running "
+            "Micro-Manager GUI session and may require loading a hardware config.",
+            file=sys.stderr,
+        )
         return MicroManagerFrameSource(core=mm_core, allow_snap_fallback=allow_snap_fallback)
     except Exception:
         pass

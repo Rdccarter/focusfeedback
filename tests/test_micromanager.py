@@ -104,7 +104,7 @@ def test_micromanager_source_requires_live_mode_by_default():
             return False
 
     source = MicroManagerFrameSource(_CoreNotLive())
-    with pytest.raises(RuntimeError, match="sequence is not running"):
+    with pytest.raises(RuntimeError, match="not running"):
         source()
 
 
@@ -148,3 +148,57 @@ def test_micromanager_stage_wait_for_device_is_optional():
     stage.move_z_um(2.5)
     assert stage.get_z_um() == pytest.approx(2.5)
     assert core.wait_calls == 0
+
+
+def test_micromanager_live_detects_buffered_frames_without_sequence_flag():
+    class _Core:
+        def isSequenceRunning(self):
+            return False
+
+        def getRemainingImageCount(self):
+            return 1
+
+        def getLastImageTimeStamp(self):
+            return 1
+
+        def getLastTaggedImage(self):
+            return {"pix": [[7, 8], [9, 10]], "tags": {"ElapsedTime-ms": 20.0}}
+
+    source = MicroManagerFrameSource(_Core())
+    image, ts = source()
+    assert image == [[7.0, 8.0], [9.0, 10.0]]
+    assert ts == pytest.approx(0.02)
+
+
+def test_micromanager_timestamp_normalization_for_core_fallback():
+    class _Core:
+        def isSequenceRunning(self):
+            return True
+
+        def getLastImageTimeStamp(self):
+            return 2_500_000.0
+
+        def getLastImage(self):
+            return [[1, 1], [1, 1]]
+
+    source = MicroManagerFrameSource(_Core())
+    _, ts = source()
+    assert ts == pytest.approx(2500.0)
+
+
+def test_micromanager_no_frame_token_still_reads_latest_each_call():
+    class _Core:
+        def __init__(self):
+            self.v = 0
+
+        def isSequenceRunning(self):
+            return True
+
+        def getLastImage(self):
+            self.v += 1
+            return [[self.v]]
+
+    source = MicroManagerFrameSource(_Core())
+    image1, _ = source()
+    image2, _ = source()
+    assert image1 != image2
