@@ -94,7 +94,9 @@ class MicroManagerFrameSource:
                     ts_for_sample = time.monotonic()
                 frame_identity = _frame_identity(frame)
 
-        image = _to_image_2d(_extract_image_payload(frame))
+        payload = _extract_image_payload(frame)
+        payload = _reshape_payload_if_needed(payload, frame)
+        image = _to_image_2d(payload)
 
         with self._lock:
             self._last_image = image
@@ -169,6 +171,69 @@ def _frame_metadata_dict(frame: Any) -> dict[str, Any] | None:
         return metadata
     return None
 
+
+
+
+def _frame_dimensions(frame: Any) -> tuple[int, int] | None:
+    md = _frame_metadata_dict(frame)
+    if md:
+        width_keys = ("Width", "ImageWidth", "width", "image_width")
+        height_keys = ("Height", "ImageHeight", "height", "image_height")
+        width = next((md.get(k) for k in width_keys if k in md), None)
+        height = next((md.get(k) for k in height_keys if k in md), None)
+        if width is not None and height is not None:
+            try:
+                w = int(width)
+                h = int(height)
+                if w > 0 and h > 0:
+                    return h, w
+            except Exception:
+                pass
+
+    for h_key, w_key in (("height", "width"), ("Height", "Width")):
+        h_val = getattr(frame, h_key, None)
+        w_val = getattr(frame, w_key, None)
+        if h_val is not None and w_val is not None:
+            try:
+                h = int(h_val)
+                w = int(w_val)
+                if w > 0 and h > 0:
+                    return h, w
+            except Exception:
+                pass
+    return None
+
+
+def _reshape_payload_if_needed(payload: Any, frame: Any) -> Any:
+    if hasattr(payload, "tolist") and callable(payload.tolist):
+        payload = payload.tolist()
+
+    if isinstance(payload, tuple):
+        payload = list(payload)
+
+    if not isinstance(payload, list):
+        return payload
+    if not payload:
+        return payload
+
+    first = payload[0]
+    if isinstance(first, (list, tuple)):
+        return payload
+
+    dims = _frame_dimensions(frame)
+    if dims is None:
+        return payload
+
+    height, width = dims
+    if len(payload) != height * width:
+        return payload
+
+    out: list[list[Any]] = []
+    idx = 0
+    for _ in range(height):
+        out.append(payload[idx: idx + width])
+        idx += width
+    return out
 
 def _extract_frame_timestamp_s(frame: Any) -> float | None:
     """Extract acquisition timestamp in seconds when metadata is explicit.

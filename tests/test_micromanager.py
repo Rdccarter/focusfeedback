@@ -174,6 +174,31 @@ def test_micromanager_source_uses_identity_when_token_stuck():
     assert ts2 > ts1
 
 
+
+
+def test_micromanager_source_reshapes_flat_payload_using_metadata_dimensions():
+    class _Core:
+        def getLastTaggedImage(self):
+            return {
+                "pix": [1, 2, 3, 4, 5, 6],
+                "tags": {"Height": 2, "Width": 3, "ElapsedTime-ms": 1000},
+            }
+
+    source = MicroManagerFrameSource(_Core())
+    image, ts = source()
+
+    assert image == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    assert ts == pytest.approx(1.0)
+
+
+def test_micromanager_source_flat_payload_without_dimensions_raises_2d_error():
+    class _Core:
+        def getLastImage(self):
+            return [1, 2, 3, 4]
+
+    source = MicroManagerFrameSource(_Core())
+    with pytest.raises(TypeError, match="Frame must be 2D"):
+        source()
 def test_micromanager_source_requires_live_mode_by_default():
     class _CoreNotLive:
         pass
