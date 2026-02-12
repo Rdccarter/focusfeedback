@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import threading
 from pathlib import Path
@@ -32,6 +33,22 @@ def _prepare_napari_environment() -> None:
     os.environ.setdefault("NAPARI_DISABLE_PLUGIN_ENTRYPOINTS", "1")
 
 
+def _calibration_plan_from_nm(center_z_um: float, half_range_nm: float, step_nm: float) -> tuple[float, float, int, float]:
+    """Build calibration sweep bounds/steps from nanometer UI values."""
+
+    half_range_nm = max(1.0, float(half_range_nm))
+    step_nm = max(1.0, float(step_nm))
+    span_nm = 2.0 * half_range_nm
+
+    z_min = center_z_um - (half_range_nm / 1000.0)
+    z_max = center_z_um + (half_range_nm / 1000.0)
+
+    n_steps = int(math.floor(span_nm / step_nm)) + 1
+    n_steps = max(2, n_steps)
+    effective_step_nm = span_nm / float(n_steps - 1)
+    return z_min, z_max, n_steps, effective_step_nm
+
+
 def launch_autofocus_viewer(
     camera: CameraInterface,
     stage: StageInterface,
@@ -57,7 +74,7 @@ def launch_autofocus_viewer(
         import napari
         import numpy as np
         from qtpy.QtCore import QTimer
-        from qtpy.QtWidgets import QPushButton
+        from qtpy.QtWidgets import QDoubleSpinBox, QLabel, QPushButton, QWidget, QVBoxLayout
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(
             "napari is required for the live viewer. Install with: pip install napari"
@@ -83,13 +100,18 @@ def launch_autofocus_viewer(
     status_text.font_size = 12
     status_text.text = "Draw a rectangle on the PSF to begin autofocus"
 
+    initial_step_nm = (2.0 * float(calibration_half_range_um) * 1000.0) / max(1, int(calibration_steps) - 1)
+
     state: dict = {
         "worker": None,
         "last_sample": None,
         "last_roi": None,
         "calibration_message": "",
         "calibration_busy": False,
+        "calibration_progress": "",
         "pending_roi": None,
+        "calibration_cancel_evt": threading.Event(),
+        "autofocus_enabled": True,
     }
 
     def _roi_from_rectangle(rect_coords) -> Roi:
@@ -112,6 +134,9 @@ def launch_autofocus_viewer(
         state["last_sample"] = sample
 
     def _start_autofocus(roi: Roi) -> None:
+        if not state.get("autofocus_enabled", True):
+            state["last_roi"] = roi
+            return
         _stop_worker(wait=False)
         config = AutofocusConfig(
             roi=roi,
@@ -157,19 +182,36 @@ def launch_autofocus_viewer(
 
     def _run_calibration_sweep(roi: Roi) -> None:
         nonlocal current_calibration
+
+        def _on_calibration_step(step_idx: int, total_steps: int, target_z: float, measured_z: float | None, ok: bool) -> None:
+            if ok and measured_z is not None:
+                state["calibration_progress"] = (
+                    f"Calibration {step_idx}/{total_steps}: "
+                    f"target={target_z:+0.3f} um, measured={measured_z:+0.3f} um"
+                )
+            else:
+                state["calibration_progress"] = (
+                    f"Calibration {step_idx}/{total_steps}: "
+                    f"target={target_z:+0.3f} um (move failed, continuing)"
+                )
+
         try:
             state["calibration_busy"] = True
+            state["calibration_progress"] = ""
             _stop_worker()
             center_z = float(stage.get_z_um())
-            z_min = center_z - float(calibration_half_range_um)
-            z_max = center_z + float(calibration_half_range_um)
+            z_min, z_max, dynamic_steps, _ = _calibration_plan_from_nm(
+                center_z, range_spin_nm.value(), step_spin_nm.value()
+            )
             samples = auto_calibrate(
                 camera,
                 stage,
                 roi,
                 z_min_um=z_min,
                 z_max_um=z_max,
-                n_steps=int(calibration_steps),
+                n_steps=dynamic_steps,
+                should_stop=state["calibration_cancel_evt"].is_set,
+                on_step=_on_calibration_step,
             )
             stage.move_z_um(center_z)
 
@@ -186,33 +228,91 @@ def launch_autofocus_viewer(
                 f"{len(samples)} samples saved to {out_path} | "
                 f"slope={report.calibration.error_to_um:+0.4f} um/error, "
                 f"error_at_focus={report.calibration.error_at_focus:+0.4f}, "
-                f"RÂ²={report.r2:0.4f}"
+                f"R²={report.r2:0.4f}"
             )
         except Exception as exc:  # pragma: no cover
             state["calibration_message"] = f"Calibration failed: {exc}"
         finally:
             state["calibration_busy"] = False
+            state["calibration_progress"] = ""
             # Use the latest ROI (user may have redrawn during the sweep).
             restart_roi = state.get("last_roi") or roi
             _start_autofocus(restart_roi)
 
     def _trigger_calibration() -> None:
         if state.get("calibration_busy"):
+            state["calibration_cancel_evt"].set()
+            state["calibration_message"] = "Stopping calibration sweep..."
             return
         roi = state.get("last_roi")
         if roi is None:
             state["calibration_message"] = "Calibration needs an ROI: draw a rectangle first"
             return
-        state["calibration_message"] = "Calibration sweep runningâ€¦"
+        state["calibration_cancel_evt"].clear()
+        center_z = float(stage.get_z_um())
+        z_min, z_max, dynamic_steps, effective_step_nm = _calibration_plan_from_nm(
+            center_z, range_spin_nm.value(), step_spin_nm.value()
+        )
+        state["calibration_message"] = (
+            f"Calibration sweep: {z_min:+0.3f} to {z_max:+0.3f} um "
+            f"in {dynamic_steps} steps (~{effective_step_nm:0.1f} nm step). "
+            "Click 'Stop Calibration Sweep' to cancel."
+        )
         t = threading.Thread(target=_run_calibration_sweep, args=(roi,), daemon=True)
         t.start()
+
+
+    def _toggle_autofocus() -> None:
+        if state.get("autofocus_enabled", True):
+            state["autofocus_enabled"] = False
+            _stop_worker(wait=False)
+            state["calibration_message"] = "Autofocus paused"
+            return
+
+        state["autofocus_enabled"] = True
+        roi = state.get("last_roi")
+        if roi is None and roi_layer.data:
+            roi = _roi_from_rectangle(roi_layer.data[-1])
+        if roi is None:
+            state["calibration_message"] = "Autofocus enabled: draw an ROI rectangle to start"
+            return
+        state["calibration_message"] = "Autofocus running"
+        _start_autofocus(roi)
+
+    autofocus_button = QPushButton("Stop Autofocus")
+    autofocus_button.setToolTip("Start/stop autofocus control without closing the viewer")
+    autofocus_button.clicked.connect(_toggle_autofocus)
+
+    range_label = QLabel("Calibration half-range (nm)")
+    range_spin_nm = QDoubleSpinBox()
+    range_spin_nm.setDecimals(1)
+    range_spin_nm.setRange(1.0, 100000.0)
+    range_spin_nm.setSingleStep(25.0)
+    range_spin_nm.setValue(float(calibration_half_range_um) * 1000.0)
+
+    step_label = QLabel("Calibration step size (nm)")
+    step_spin_nm = QDoubleSpinBox()
+    step_spin_nm.setDecimals(1)
+    step_spin_nm.setRange(1.0, 100000.0)
+    step_spin_nm.setSingleStep(10.0)
+    step_spin_nm.setValue(max(1.0, initial_step_nm))
 
     calibrate_button = QPushButton("Run Calibration Sweep")
     calibrate_button.setToolTip(
         "Pause autofocus, sweep Z around the current position, and export calibration CSV"
     )
     calibrate_button.clicked.connect(_trigger_calibration)
-    viewer.window.add_dock_widget(calibrate_button, area="right", name="Calibration")
+
+    control_widget = QWidget()
+    control_layout = QVBoxLayout(control_widget)
+    control_layout.setContentsMargins(8, 8, 8, 8)
+    control_layout.addWidget(autofocus_button)
+    control_layout.addWidget(range_label)
+    control_layout.addWidget(range_spin_nm)
+    control_layout.addWidget(step_label)
+    control_layout.addWidget(step_spin_nm)
+    control_layout.addWidget(calibrate_button)
+    viewer.window.add_dock_widget(control_widget, area="right", name="Autofocus Controls")
 
     @viewer.bind_key("c")
     def _calibrate(_viewer_ref):  # noqa: ARG001
@@ -227,6 +327,9 @@ def launch_autofocus_viewer(
     timer = QTimer()
 
     def _refresh() -> None:
+        autofocus_button.setText("Stop Autofocus" if state.get("autofocus_enabled", True) else "Start Autofocus")
+        calibrate_button.setText("Stop Calibration Sweep" if state.get("calibration_busy") else "Run Calibration Sweep")
+
         try:
             frame = camera.get_frame()
             image_layer.data = np.asarray(frame.image)
@@ -234,13 +337,19 @@ def launch_autofocus_viewer(
             status_text.text = f"Live frame error: {exc}"
             return
 
+        current_z = None
+        try:
+            current_z = float(stage.get_z_um())
+        except Exception:
+            pass
+
         sample = state.get("last_sample")
         if sample is not None:
             ctrl = "ON " if sample.control_applied else "OFF"
             status_text.text = (
                 f"AF {ctrl} | "
                 f"err={sample.error:+.4f}  err_um={sample.error_um:+.3f}  "
-                f"z={sample.stage_z_um:+.3f} â†’ {sample.commanded_z_um:+.3f} Âµm  "
+                f"z(now)={(sample.stage_z_um if current_z is None else current_z):+.3f} → cmd={sample.commanded_z_um:+.3f} um  "
                 f"I={sample.roi_total_intensity:.0f}"
             )
             worker = state.get("worker")
@@ -248,11 +357,17 @@ def launch_autofocus_viewer(
                 status_text.text += f"  âš  {worker.last_error}"
         elif not roi_layer.data:
             status_text.text = "Draw a rectangle on the PSF to begin autofocus"
+            if current_z is not None:
+                status_text.text += f" | z={current_z:+.3f} um"
         else:
-            status_text.text = "Starting autofocusâ€¦"
+            status_text.text = "Starting autofocus..."
+            if current_z is not None:
+                status_text.text += f" | z={current_z:+.3f} um"
 
         if state.get("calibration_message"):
             status_text.text += f"\n{state['calibration_message']}"
+        if state.get("calibration_progress"):
+            status_text.text += f"\n{state['calibration_progress']}"
 
     timer.timeout.connect(_refresh)
     timer.start(max(1, int(interval_ms)))

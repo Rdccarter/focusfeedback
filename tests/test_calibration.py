@@ -104,3 +104,61 @@ def test_auto_calibrate_raises_clear_error_if_too_many_moves_fail() -> None:
             z_max_um=0.2,
             n_steps=3,
         )
+
+
+def test_auto_calibrate_can_be_cancelled_via_should_stop() -> None:
+    class _Stage:
+        def move_z_um(self, target_z_um: float) -> None:
+            return None
+
+        def get_z_um(self) -> float:
+            return 0.0
+
+    class _Camera:
+        def get_frame(self) -> CameraFrame:
+            return CameraFrame(image=[[0.0] * 64 for _ in range(64)], timestamp_s=0.0)
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        auto_calibrate(
+            camera=_Camera(),
+            stage=_Stage(),
+            roi=Roi(x=20, y=20, width=24, height=24),
+            z_min_um=-0.2,
+            z_max_um=0.2,
+            n_steps=3,
+            should_stop=lambda: True,
+        )
+
+
+def test_auto_calibrate_reports_step_progress() -> None:
+    class _Stage:
+        def __init__(self):
+            self.z = 0.0
+
+        def move_z_um(self, target_z_um: float) -> None:
+            self.z = target_z_um
+
+        def get_z_um(self) -> float:
+            return self.z
+
+    class _Camera:
+        def get_frame(self) -> CameraFrame:
+            return CameraFrame(image=[[0.0] * 64 for _ in range(64)], timestamp_s=0.0)
+
+    events: list[tuple[int, int, float, float | None, bool]] = []
+    auto_calibrate(
+        camera=_Camera(),
+        stage=_Stage(),
+        roi=Roi(x=20, y=20, width=24, height=24),
+        z_min_um=-0.2,
+        z_max_um=0.2,
+        n_steps=3,
+        on_step=lambda i, total, target, measured, ok: events.append(
+            (i, total, target, measured, ok)
+        ),
+    )
+
+    assert len(events) == 3
+    assert [event[0] for event in events] == [1, 2, 3]
+    assert all(event[1] == 3 for event in events)
+    assert all(event[4] is True for event in events)

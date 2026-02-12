@@ -198,6 +198,8 @@ def auto_calibrate(
     z_min_um: float,
     z_max_um: float,
     n_steps: int,
+    should_stop: Callable[[], bool] | None = None,
+    on_step: Callable[[int, int, float, float | None, bool], None] | None = None,
 ) -> list[CalibrationSample]:
     """Collect calibration samples from a deterministic stage sweep."""
 
@@ -210,11 +212,17 @@ def auto_calibrate(
     out: list[CalibrationSample] = []
     failed_moves: list[tuple[float, Exception]] = []
     for i in range(n_steps):
+        if should_stop is not None and should_stop():
+            raise RuntimeError("Calibration cancelled by user")
+
         target_z = z_min_um + i * step
+        step_index = i + 1
         try:
             stage.move_z_um(target_z)
         except Exception as exc:
             failed_moves.append((target_z, exc))
+            if on_step is not None:
+                on_step(step_index, n_steps, target_z, None, False)
             continue
 
         frame = camera.get_frame()
@@ -227,6 +235,9 @@ def auto_calibrate(
             measured_z = float(stage.get_z_um())
         except Exception:
             pass
+
+        if on_step is not None:
+            on_step(step_index, n_steps, target_z, measured_z, True)
 
         out.append(CalibrationSample(z_um=measured_z, error=err, weight=max(0.0, weight)))
 
