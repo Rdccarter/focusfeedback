@@ -117,15 +117,36 @@ def _load_startup_calibration(samples_csv: str | None) -> FocusCalibration:
     return report.calibration
 
 
+def _build_stage(args) -> MclNanoZStage:
+    stage_backend = args.stage or ("simulate" if args.camera == "simulate" else "mcl")
+
+    if stage_backend == "simulate":
+        if args.stage_dll is not None or args.stage_wrapper is not None:
+            print(
+                "Warning: --stage simulate ignores --stage-dll/--stage-wrapper inputs.",
+                file=sys.stderr,
+            )
+        return MclNanoZStage()
+
+    stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
+    if args.stage_dll is None and args.stage_wrapper is None:
+        print(
+            "Warning: no explicit MCL stage backend configured; using in-memory simulated stage.",
+            file=sys.stderr,
+        )
+    return stage
+
+
 def _build_camera_and_stage(args):
-    # â”€â”€ Simulated camera + in-memory stage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    stage = _build_stage(args)
+
+    # Simulated camera + in-memory stage
     if args.camera == "simulate":
-        stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
         stage.move_z_um(1.5)
         camera = SimulatedCamera(stage=stage)
         return camera, stage
 
-    # â”€â”€ Micro-Manager camera stream (MM owns camera only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Micro-Manager camera stream (MM owns camera only)
     if args.camera == "micromanager":
         from .micromanager import create_micromanager_frame_source
 
@@ -134,24 +155,9 @@ def _build_camera_and_stage(args):
             frame_source=mm_source,
             control_source_lifecycle=False,
         )
-        stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
-        if args.stage_dll is None and args.stage_wrapper is None:
-            print(
-                "Warning: micromanager camera selected with no explicit MCL stage backend; "
-                "using in-memory simulated stage.",
-                file=sys.stderr,
-            )
         return camera, stage
 
-    # â”€â”€ pylablib camera (orca / andor) + package-controlled stage â”€â”€â”€
-    stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
-    if args.stage_dll is None and args.stage_wrapper is None:
-        print(
-            "Warning: non-simulated camera selected but no stage backend configured; "
-            "using in-memory simulated stage.",
-            file=sys.stderr,
-        )
-
+    # pylablib camera (orca / andor) + package-controlled stage
     frame_source = create_pylablib_frame_source(args.camera, idx=args.camera_index)
     camera = HamamatsuOrcaCamera(frame_source=frame_source, control_source_lifecycle=True)
     return camera, stage
@@ -161,63 +167,65 @@ def main() -> int:
     args = build_parser().parse_args()
 
     camera, stage = _build_camera_and_stage(args)
+    camera_started = False
 
-    # For micromanager mode, don't call start â€” MM owns the camera.
-    if args.camera != "micromanager":
-        camera.start()
-
-    config = AutofocusConfig(
-        roi=Roi(x=20, y=20, width=24, height=24),
-        loop_hz=args.loop_hz,
-        kp=args.kp,
-        ki=args.ki,
-        max_step_um=args.max_step,
-    )
     try:
-        calibration = _load_startup_calibration(args.calibration_csv)
-    except ValueError as exc:
-        if not args.show_live:
-            raise
-        print(f"Warning: {exc}", file=sys.stderr)
-        print(
-            "Warning: using temporary default calibration for live setup only; "
-            "run calibration sweep and restart to use saved calibration.",
-            file=sys.stderr,
-        )
-        calibration = FocusCalibration(error_at_focus=0.0, error_to_um=1.0)
-
-    if args.show_live:
-        launch_autofocus_viewer(
-            camera,
-            stage,
-            calibration=calibration,
-            default_config=config,
-            calibration_output_path=args.calibration_csv,
-            calibration_half_range_um=args.calibration_half_range_um,
-            calibration_steps=args.calibration_steps,
-        )
+        # For micromanager mode, don't call start — MM owns the camera.
         if args.camera != "micromanager":
-            camera.stop()
-        return 0
+            camera.start()
+            camera_started = True
 
-    controller = AstigmaticAutofocusController(
-        camera=camera,
-        stage=stage,
-        config=config,
-        calibration=calibration,
-    )
-
-    samples = controller.run(duration_s=args.duration)
-    if args.camera != "micromanager":
-        camera.stop()
-
-    if samples:
-        final = samples[-1]
-        print(
-            f"camera={args.camera} steps={len(samples)} final_error={final.error:+0.4f} "
-            f"final_error_um={final.error_um:+0.3f} stage={final.commanded_z_um:+0.3f} um"
+        config = AutofocusConfig(
+            roi=Roi(x=20, y=20, width=24, height=24),
+            loop_hz=args.loop_hz,
+            kp=args.kp,
+            ki=args.ki,
+            max_step_um=args.max_step,
         )
-    return 0
+        try:
+            calibration = _load_startup_calibration(args.calibration_csv)
+        except ValueError as exc:
+            if not args.show_live:
+                raise
+            print(f"Warning: {exc}", file=sys.stderr)
+            print(
+                "Warning: using temporary default calibration for live setup only; "
+                "run calibration sweep and restart to use saved calibration.",
+                file=sys.stderr,
+            )
+            calibration = FocusCalibration(error_at_focus=0.0, error_to_um=1.0)
+
+        if args.show_live:
+            launch_autofocus_viewer(
+                camera,
+                stage,
+                calibration=calibration,
+                default_config=config,
+                calibration_output_path=args.calibration_csv,
+                calibration_half_range_um=args.calibration_half_range_um,
+                calibration_steps=args.calibration_steps,
+            )
+            return 0
+
+        controller = AstigmaticAutofocusController(
+            camera=camera,
+            stage=stage,
+            config=config,
+            calibration=calibration,
+        )
+
+        samples = controller.run(duration_s=args.duration)
+
+        if samples:
+            final = samples[-1]
+            print(
+                f"camera={args.camera} steps={len(samples)} final_error={final.error:+0.4f} "
+                f"final_error_um={final.error_um:+0.3f} stage={final.commanded_z_um:+0.3f} um"
+            )
+        return 0
+    finally:
+        if camera_started:
+            camera.stop()
 
 
 if __name__ == "__main__":
