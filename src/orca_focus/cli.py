@@ -52,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Stage backend. Defaults: simulate camera -> simulate stage, "
-            "micromanager camera -> micromanager stage, other cameras -> mcl stage."
+            "all hardware cameras (including micromanager) -> mcl stage."
         ),
     )
     parser.add_argument("--stage-dll", default=None, help="Path to MCL stage DLL")
@@ -130,9 +130,7 @@ def _load_startup_calibration(samples_csv: str | None) -> FocusCalibration:
 
 
 def _build_stage(args, *, mm_core=None) -> StageInterface:
-    stage_backend = args.stage or (
-        "simulate" if args.camera == "simulate" else ("micromanager" if args.camera == "micromanager" else "mcl")
-    )
+    stage_backend = args.stage or ("simulate" if args.camera == "simulate" else "mcl")
 
     if stage_backend == "simulate":
         if args.stage_dll is not None or args.stage_wrapper is not None:

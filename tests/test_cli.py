@@ -83,10 +83,31 @@ def test_build_camera_and_stage_forwards_mm_standalone_flag() -> None:
             _build_camera_and_stage(args)
 
     assert create_mm.call_args.kwargs["allow_standalone_core"] is True
-def test_build_camera_and_stage_defaults_to_micromanager_stage_for_mm_camera() -> None:
+def test_build_camera_and_stage_defaults_to_mcl_stage_for_mm_camera() -> None:
     from orca_focus.cli import _build_camera_and_stage
 
-    args = build_parser().parse_args(["--camera", "micromanager", "--stage-dll", "C:/bad/path/Madlib.dll"])
+    args = build_parser().parse_args(["--camera", "micromanager", "--stage-dll", "C:/path/Madlib.dll"])
+
+    with patch("orca_focus.micromanager.create_micromanager_frame_source") as create_mm,         patch("orca_focus.cli.MclNanoZStage") as mcl_stage_cls:
+        core = object()
+        create_mm.return_value = lambda: ([[0.0]], 0.0)
+        create_mm.return_value.core = core
+        mcl_stage = object()
+        mcl_stage_cls.return_value = mcl_stage
+
+        camera, stage = _build_camera_and_stage(args)
+
+    assert stage is mcl_stage
+    mcl_stage_cls.assert_called_once_with(dll_path="C:/path/Madlib.dll", wrapper_module=None)
+    assert camera is not None
+
+
+
+
+def test_build_camera_and_stage_supports_explicit_micromanager_stage_for_mm_camera() -> None:
+    from orca_focus.cli import _build_camera_and_stage
+
+    args = build_parser().parse_args(["--camera", "micromanager", "--stage", "micromanager"])
 
     with patch("orca_focus.micromanager.create_micromanager_frame_source") as create_mm:
         core = object()
@@ -97,13 +118,10 @@ def test_build_camera_and_stage_defaults_to_micromanager_stage_for_mm_camera() -
             mm_stage = object()
             mm_stage_cls.return_value = mm_stage
 
-            camera, stage = _build_camera_and_stage(args)
+            _camera, stage = _build_camera_and_stage(args)
 
     assert stage is mm_stage
     mm_stage_cls.assert_called_once_with(core=core)
-    # Still returns MM-backed camera without trying to initialize MCL DLL.
-    assert camera is not None
-
 
 def test_build_stage_mcl_failure_has_actionable_message() -> None:
     from orca_focus.cli import _build_stage
