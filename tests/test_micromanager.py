@@ -38,6 +38,9 @@ def test_micromanager_source_falls_back_to_mmcorepy(monkeypatch):
     fake_py.Core = _AlwaysFailCoreFactory()
     monkeypatch.setitem(sys.modules, "pycromanager", fake_py)
 
+    # Force pymmcore import to fail so legacy MMCorePy path is exercised.
+    monkeypatch.delitem(sys.modules, "pymmcore", raising=False)
+
     fake_mmcorepy = ModuleType("MMCorePy")
     fake_mmcorepy.CMMCore = lambda: SimpleNamespace(source="mmcorepy")
     monkeypatch.setitem(sys.modules, "MMCorePy", fake_mmcorepy)
@@ -45,6 +48,20 @@ def test_micromanager_source_falls_back_to_mmcorepy(monkeypatch):
     source = create_micromanager_frame_source(host="localhost", port=4827)
 
     assert source.core.source == "mmcorepy"
+
+
+def test_micromanager_source_falls_back_to_pymmcore(monkeypatch):
+    fake_py = ModuleType("pycromanager")
+    fake_py.Core = _AlwaysFailCoreFactory()
+    monkeypatch.setitem(sys.modules, "pycromanager", fake_py)
+
+    fake_pymmcore = ModuleType("pymmcore")
+    fake_pymmcore.CMMCore = lambda: SimpleNamespace(source="pymmcore")
+    monkeypatch.setitem(sys.modules, "pymmcore", fake_pymmcore)
+
+    source = create_micromanager_frame_source(host="localhost", port=4827)
+
+    assert source.core.source == "pymmcore"
 
 
 def test_micromanager_source_errors_with_clear_message(monkeypatch):

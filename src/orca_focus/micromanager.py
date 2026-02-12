@@ -217,6 +217,27 @@ def _try_create_pycromanager_core(host: str, port: int) -> Any | None:
         return None
 
 
+def _try_create_pymmcore_core() -> Any | None:
+    """Best-effort local MMCore fallback without pycromanager bridge.
+
+    Supports both modern `pymmcore` and legacy `MMCorePy` module names.
+    """
+    for module_name in ("pymmcore", "MMCorePy"):
+        try:
+            module = __import__(module_name)
+        except Exception:
+            continue
+
+        core_ctor = getattr(module, "CMMCore", None)
+        if not callable(core_ctor):
+            continue
+        try:
+            return core_ctor()
+        except Exception:
+            continue
+    return None
+
+
 def create_micromanager_frame_source(
     *,
     host: str = "localhost",
@@ -232,24 +253,20 @@ def create_micromanager_frame_source(
     if mm_core is not None:
         return MicroManagerFrameSource(core=mm_core, allow_snap_fallback=allow_snap_fallback)
 
-    try:
-        import MMCorePy
-
-        mm_core = MMCorePy.CMMCore()
+    mm_core = _try_create_pymmcore_core()
+    if mm_core is not None:
         print(
-            "Warning: using bare MMCorePy.CMMCore(); this core is not attached to a running "
+            "Warning: using bare MMCore CMMCore(); this core is not attached to a running "
             "Micro-Manager GUI session and may require loading a hardware config.",
             file=sys.stderr,
         )
         return MicroManagerFrameSource(core=mm_core, allow_snap_fallback=allow_snap_fallback)
-    except Exception:
-        pass
 
     raise RuntimeError(
         "Could not connect to Micro-Manager. Make sure one of these is true:\n"
         "  1. Micro-Manager is running with pycromanager bridge enabled\n"
         "     (Tools -> Options -> Run server on port), or\n"
         "  2. pycromanager can attach via its default local bridge (Core()), or\n"
-        "  3. MMCorePy is available in the Python environment.\n"
+        "  3. pymmcore/MMCorePy is available in the Python environment.\n"
         f"  Tried pycromanager at {host}:{port} and default Core()"
     )
