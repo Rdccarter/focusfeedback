@@ -11,6 +11,11 @@ class _FakeCore:
         return "ok"
 
 
+class _SnakeCaseCore:
+    def get_version_info(self):
+        return "ok"
+
+
 class _RemoteFailLocalOkCoreFactory:
     def __call__(self, *args, **kwargs):
         if "host" in kwargs or "port" in kwargs:
@@ -33,6 +38,16 @@ def test_micromanager_source_uses_pycromanager_default_if_host_port_fails(monkey
     assert isinstance(source.core, _FakeCore)
 
 
+
+
+def test_micromanager_source_uses_pycromanager_snake_case_api(monkeypatch):
+    fake_module = ModuleType("pycromanager")
+    fake_module.Core = lambda *args, **kwargs: _SnakeCaseCore()
+    monkeypatch.setitem(sys.modules, "pycromanager", fake_module)
+
+    source = create_micromanager_frame_source(host="localhost", port=4827)
+
+    assert isinstance(source.core, _SnakeCaseCore)
 def test_micromanager_source_falls_back_to_mmcorepy(monkeypatch):
     fake_py = ModuleType("pycromanager")
     fake_py.Core = _AlwaysFailCoreFactory()
@@ -192,6 +207,41 @@ def test_micromanager_source_without_explicit_timestamp_uses_monotonic():
     assert ts > 0
 
 
+
+
+def test_micromanager_source_and_stage_support_snake_case_core_methods():
+    class _Core:
+        def __init__(self):
+            self.position = 0.0
+
+        def get_focus_device(self):
+            return "Z"
+
+        def get_position(self, _name):
+            return self.position
+
+        def set_position(self, _name, z):
+            self.position = z
+
+        def wait_for_device(self, _name):
+            return None
+
+        def get_last_image_time_stamp(self):
+            return 1
+
+        def get_last_tagged_image(self):
+            return {"pix": [[5, 6], [7, 8]], "tags": {"ElapsedTime-ms": 1234}}
+
+    core = _Core()
+    source = MicroManagerFrameSource(core)
+    stage = MicroManagerStage(core=core)
+
+    image, ts = source()
+    assert image == [[5.0, 6.0], [7.0, 8.0]]
+    assert ts == pytest.approx(1.234)
+
+    stage.move_z_um(3.0)
+    assert stage.get_z_um() == pytest.approx(3.0)
 def test_micromanager_stage_wait_for_device_is_optional():
     class _Core:
         def __init__(self):

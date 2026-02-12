@@ -15,6 +15,21 @@ from .dcam import _to_image_2d
 from .interfaces import Image2D, StageInterface
 
 
+def _get_core_callable(core: Any, *names: str):
+    for name in names:
+        fn = getattr(core, name, None)
+        if callable(fn):
+            return fn
+    return None
+
+
+def _call_core(core: Any, names: tuple[str, ...], *args: Any) -> Any:
+    fn = _get_core_callable(core, *names)
+    if fn is None:
+        raise AttributeError(f"Core method not found (tried: {', '.join(names)})")
+    return fn(*args)
+
+
 class MicroManagerFrameSource:
     """Frame source that reads from Micro-Manager's live circular buffer.
 
@@ -68,8 +83,8 @@ class MicroManagerFrameSource:
                         "Micro-Manager sequence/live mode is not running. Enable Live mode in "
                         "Micro-Manager or construct the frame source with allow_snap_fallback=True."
                     )
-                core.snapImage()
-                frame = core.getImage()
+                _call_core(core, ("snapImage", "snap_image"))
+                frame = _call_core(core, ("getImage", "get_image"))
                 ts_for_sample = time.monotonic()
                 token = None
                 frame_identity = None
@@ -100,15 +115,18 @@ class MicroManagerStage(StageInterface):
     ) -> None:
         self._core = core
         self._wait_for_device = wait_for_device
-        self._z_name = z_stage_name or core.getFocusDevice()
+        if z_stage_name is not None:
+            self._z_name = z_stage_name
+        else:
+            self._z_name = str(_call_core(core, ("getFocusDevice", "get_focus_device")))
 
     def get_z_um(self) -> float:
-        return float(self._core.getPosition(self._z_name))
+        return float(_call_core(self._core, ("getPosition", "get_position"), self._z_name))
 
     def move_z_um(self, target_z_um: float) -> None:
-        self._core.setPosition(self._z_name, target_z_um)
+        _call_core(self._core, ("setPosition", "set_position"), self._z_name, target_z_um)
         if self._wait_for_device:
-            self._core.waitForDevice(self._z_name)
+            _call_core(self._core, ("waitForDevice", "wait_for_device"), self._z_name)
 
 
 def _get_frame_token(core: Any) -> int | float | str | None:
@@ -118,7 +136,7 @@ def _get_frame_token(core: Any) -> int | float | str | None:
     most MM backends. If unavailable, token-based duplicate detection is
     disabled and callers always process newest frame.
     """
-    fn = getattr(core, "getLastImageTimeStamp", None)
+    fn = _get_core_callable(core, "getLastImageTimeStamp", "get_last_image_time_stamp")
     if callable(fn):
         try:
             return fn()
@@ -186,9 +204,9 @@ def _frame_identity(frame: Any) -> int | float | str | None:
 
 def _try_get_last_image(core: Any) -> Any | None:
     """Grab most recent frame from the circular buffer, or None if unavailable."""
-    for method in ("getLastTaggedImage", "getLastImage"):
-        fn = getattr(core, method, None)
-        if callable(fn):
+    for names in (("getLastTaggedImage", "get_last_tagged_image"), ("getLastImage", "get_last_image")):
+        fn = _get_core_callable(core, *names)
+        if fn is not None:
             try:
                 return fn()
             except Exception:
@@ -204,14 +222,14 @@ def _try_create_pycromanager_core(host: str, port: int) -> Any | None:
 
     try:
         core = Core(host=host, port=port)
-        core.getVersionInfo()
+        _call_core(core, ("getVersionInfo", "get_version_info"))
         return core
     except Exception:
         pass
 
     try:
         core = Core()
-        core.getVersionInfo()
+        _call_core(core, ("getVersionInfo", "get_version_info"))
         return core
     except Exception:
         return None
