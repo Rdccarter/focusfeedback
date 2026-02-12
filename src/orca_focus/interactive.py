@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 
@@ -17,6 +18,18 @@ from .calibration import (
 )
 from .focus_metric import Roi
 from .interfaces import CameraInterface, StageInterface
+
+
+def _prepare_napari_environment() -> None:
+    """Set safe defaults to avoid third-party napari plugin crashes.
+
+    Some environments have incompatible external napari plugins (e.g. pydantic
+    API mismatches) that can crash viewer startup and interaction. Disabling
+    external plugin auto-discovery keeps core viewer behavior stable.
+    """
+    os.environ.setdefault("NAPARI_DISABLE_PLUGINS", "1")
+    os.environ.setdefault("NAPARI_DISABLE_PLUGIN_ENTRY_POINTS", "1")
+    os.environ.setdefault("NAPARI_DISABLE_PLUGIN_ENTRYPOINTS", "1")
 
 
 def launch_autofocus_viewer(
@@ -37,6 +50,8 @@ def launch_autofocus_viewer(
     - Click the "Run Calibration Sweep" button (or press `c`) to sweep Z and save CSV.
     - Press `Escape` to stop and close.
     """
+
+    _prepare_napari_environment()
 
     try:
         import napari
@@ -74,6 +89,7 @@ def launch_autofocus_viewer(
         "last_roi": None,
         "calibration_message": "",
         "calibration_busy": False,
+        "pending_roi": None,
     }
 
     def _roi_from_rectangle(rect_coords) -> Roi:
@@ -86,17 +102,17 @@ def launch_autofocus_viewer(
         h = max(1, y_max - y_min)
         return Roi(x=max(0, x_min), y=max(0, y_min), width=w, height=h)
 
-    def _stop_worker() -> None:
+    def _stop_worker(*, wait: bool = True) -> None:
         worker = state.get("worker")
         if worker is not None:
-            worker.stop()
+            worker.stop(wait=wait)
             state["worker"] = None
 
     def _on_sample(sample: AutofocusSample) -> None:
         state["last_sample"] = sample
 
     def _start_autofocus(roi: Roi) -> None:
-        _stop_worker()
+        _stop_worker(wait=False)
         config = AutofocusConfig(
             roi=roi,
             loop_hz=default_config.loop_hz,
@@ -121,16 +137,23 @@ def launch_autofocus_viewer(
         state["last_roi"] = roi
         worker.start()
 
-    def _on_roi_change(_event=None) -> None:
-        shapes = roi_layer.data
-        if not shapes:
-            return
-        rect = shapes[-1]
-        try:
-            roi = _roi_from_rectangle(rect)
-        except Exception:
+    def _apply_pending_roi() -> None:
+        roi = state.get("pending_roi")
+        if roi is None:
             return
         _start_autofocus(roi)
+
+    def _on_roi_change(_event=None) -> None:
+        try:
+            shapes = roi_layer.data
+            if not shapes:
+                return
+            rect = shapes[-1]
+            roi = _roi_from_rectangle(rect)
+            state["pending_roi"] = roi
+            roi_apply_timer.start(200)
+        except Exception as exc:
+            state["calibration_message"] = f"ROI update failed: {exc}"
 
     def _run_calibration_sweep(roi: Roi) -> None:
         nonlocal current_calibration
@@ -195,13 +218,21 @@ def launch_autofocus_viewer(
     def _calibrate(_viewer_ref):  # noqa: ARG001
         _trigger_calibration()
 
+    roi_apply_timer = QTimer()
+    roi_apply_timer.setSingleShot(True)
+    roi_apply_timer.timeout.connect(_apply_pending_roi)
+
     roi_layer.events.data.connect(_on_roi_change)
 
     timer = QTimer()
 
     def _refresh() -> None:
-        frame = camera.get_frame()
-        image_layer.data = np.asarray(frame.image)
+        try:
+            frame = camera.get_frame()
+            image_layer.data = np.asarray(frame.image)
+        except Exception as exc:
+            status_text.text = f"Live frame error: {exc}"
+            return
 
         sample = state.get("last_sample")
         if sample is not None:
@@ -232,12 +263,15 @@ def launch_autofocus_viewer(
         viewer_ref.close()
 
     viewer.window._orca_focus_timer = timer  # type: ignore[attr-defined]
+    viewer.window._orca_focus_roi_timer = roi_apply_timer  # type: ignore[attr-defined]
     napari.run()
     _stop_worker()
 
 
 def launch_napari_viewer(camera: CameraInterface, interval_ms: int = 20) -> None:
     """Display a live interactive camera stream using napari."""
+
+    _prepare_napari_environment()
 
     try:
         import napari
@@ -261,6 +295,7 @@ def launch_napari_viewer(camera: CameraInterface, interval_ms: int = 20) -> None
     timer.start(max(1, int(interval_ms)))
 
     viewer.window._orca_focus_timer = timer  # type: ignore[attr-defined]
+    viewer.window._orca_focus_roi_timer = roi_apply_timer  # type: ignore[attr-defined]
     napari.run()
 
 
