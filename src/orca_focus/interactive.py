@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 
@@ -17,6 +18,16 @@ from .calibration import (
 )
 from .focus_metric import Roi
 from .interfaces import CameraInterface, StageInterface
+
+
+def _prepare_napari_environment() -> None:
+    """Set safe defaults to avoid third-party napari plugin crashes.
+
+    Some environments have incompatible external napari plugins (e.g. pydantic
+    API mismatches) that can crash viewer startup and interaction. Disabling
+    external plugin auto-discovery keeps core viewer behavior stable.
+    """
+    os.environ.setdefault("NAPARI_DISABLE_PLUGINS", "1")
 
 
 def launch_autofocus_viewer(
@@ -37,6 +48,8 @@ def launch_autofocus_viewer(
     - Click the "Run Calibration Sweep" button (or press `c`) to sweep Z and save CSV.
     - Press `Escape` to stop and close.
     """
+
+    _prepare_napari_environment()
 
     try:
         import napari
@@ -238,6 +251,8 @@ def launch_autofocus_viewer(
 
 def launch_napari_viewer(camera: CameraInterface, interval_ms: int = 20) -> None:
     """Display a live interactive camera stream using napari."""
+
+    _prepare_napari_environment()
 
     try:
         import napari

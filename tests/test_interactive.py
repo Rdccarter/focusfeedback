@@ -1,8 +1,10 @@
+import os
 import sys
 import types
 
 import pytest
 
+from orca_focus import interactive
 from orca_focus.interactive import launch_matplotlib_viewer
 from orca_focus.interfaces import CameraFrame
 
@@ -79,3 +81,19 @@ def test_launch_matplotlib_viewer_uses_animation(monkeypatch) -> None:
     launch_matplotlib_viewer(_FakeCamera())
 
     assert fake_pyplot.show_called is True
+
+
+def test_prepare_napari_environment_sets_disable_plugins(monkeypatch):
+    monkeypatch.delenv("NAPARI_DISABLE_PLUGINS", raising=False)
+
+    interactive._prepare_napari_environment()
+
+    assert os.environ.get("NAPARI_DISABLE_PLUGINS") == "1"
+
+
+def test_prepare_napari_environment_respects_existing_value(monkeypatch):
+    monkeypatch.setenv("NAPARI_DISABLE_PLUGINS", "0")
+
+    interactive._prepare_napari_environment()
+
+    assert os.environ.get("NAPARI_DISABLE_PLUGINS") == "0"
