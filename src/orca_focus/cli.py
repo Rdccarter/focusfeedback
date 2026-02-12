@@ -12,7 +12,8 @@ from .calibration import (
     validate_calibration_sign,
 )
 from .focus_metric import Roi
-from .hardware import HamamatsuOrcaCamera, MclNanoZStage, SimulatedCamera
+from .hardware import HamamatsuOrcaCamera, MclNanoZStage, NotConnectedError, SimulatedCamera
+from .interfaces import StageInterface
 from .interactive import launch_autofocus_viewer
 from .pylablib_camera import create_pylablib_frame_source
 
@@ -38,10 +39,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mm-host", default="localhost", help="Micro-Manager pycromanager host")
     parser.add_argument("--mm-port", type=int, default=4827, help="Micro-Manager pycromanager port")
     parser.add_argument(
+        "--mm-allow-standalone-core",
+        action="store_true",
+        help=(
+            "Allow fallback to standalone pymmcore/MMCorePy CMMCore if bridge attach fails. "
+            "Use only when intentionally running without attaching to MM GUI."
+        ),
+    )
+    parser.add_argument(
         "--stage",
-        choices=["mcl", "simulate"],
+        choices=["mcl", "simulate", "micromanager"],
         default=None,
-        help="Stage backend. In micromanager camera mode this package still controls stage via direct MCL access.",
+        help=(
+            "Stage backend. Defaults: simulate camera -> simulate stage, "
+            "micromanager camera -> micromanager stage, other cameras -> mcl stage."
+        ),
     )
     parser.add_argument("--stage-dll", default=None, help="Path to MCL stage DLL")
     parser.add_argument(
@@ -117,8 +129,10 @@ def _load_startup_calibration(samples_csv: str | None) -> FocusCalibration:
     return report.calibration
 
 
-def _build_stage(args) -> MclNanoZStage:
-    stage_backend = args.stage or ("simulate" if args.camera == "simulate" else "mcl")
+def _build_stage(args, *, mm_core=None) -> StageInterface:
+    stage_backend = args.stage or (
+        "simulate" if args.camera == "simulate" else ("micromanager" if args.camera == "micromanager" else "mcl")
+    )
 
     if stage_backend == "simulate":
         if args.stage_dll is not None or args.stage_wrapper is not None:
@@ -128,7 +142,29 @@ def _build_stage(args) -> MclNanoZStage:
             )
         return MclNanoZStage()
 
-    stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
+    if stage_backend == "micromanager":
+        if mm_core is None:
+            raise RuntimeError(
+                "Micro-Manager stage backend requested but no Micro-Manager core is available. "
+                "Use --camera micromanager or choose --stage mcl/simulate."
+            )
+        if args.stage_dll is not None or args.stage_wrapper is not None:
+            print(
+                "Warning: --stage micromanager ignores --stage-dll/--stage-wrapper inputs.",
+                file=sys.stderr,
+            )
+        from .micromanager import MicroManagerStage
+
+        return MicroManagerStage(core=mm_core)
+
+    try:
+        stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
+    except (NotConnectedError, OSError, FileNotFoundError) as exc:
+        raise RuntimeError(
+            f"Failed to initialize MCL stage: {exc}. "
+            "If the stage is controlled through Micro-Manager, use --stage micromanager. "
+            "To run without hardware stage control, use --stage simulate."
+        ) from exc
     if args.stage_dll is None and args.stage_wrapper is None:
         print(
             "Warning: no explicit MCL stage backend configured; using in-memory simulated stage.",
@@ -138,10 +174,9 @@ def _build_stage(args) -> MclNanoZStage:
 
 
 def _build_camera_and_stage(args):
-    stage = _build_stage(args)
-
     # Simulated camera + in-memory stage
     if args.camera == "simulate":
+        stage = _build_stage(args)
         stage.move_z_um(1.5)
         camera = SimulatedCamera(stage=stage)
         return camera, stage
@@ -150,7 +185,12 @@ def _build_camera_and_stage(args):
     if args.camera == "micromanager":
         from .micromanager import create_micromanager_frame_source
 
-        mm_source = create_micromanager_frame_source(host=args.mm_host, port=args.mm_port)
+        mm_source = create_micromanager_frame_source(
+            host=args.mm_host,
+            port=args.mm_port,
+            allow_standalone_core=args.mm_allow_standalone_core,
+        )
+        stage = _build_stage(args, mm_core=mm_source.core)
         camera = HamamatsuOrcaCamera(
             frame_source=mm_source,
             control_source_lifecycle=False,
@@ -158,6 +198,7 @@ def _build_camera_and_stage(args):
         return camera, stage
 
     # pylablib camera (orca / andor) + package-controlled stage
+    stage = _build_stage(args)
     frame_source = create_pylablib_frame_source(args.camera, idx=args.camera_index)
     camera = HamamatsuOrcaCamera(frame_source=frame_source, control_source_lifecycle=True)
     return camera, stage
@@ -170,10 +211,8 @@ def main() -> int:
     camera_started = False
 
     try:
-        # For micromanager mode, don't call start — MM owns the camera.
-        if args.camera != "micromanager":
-            camera.start()
-            camera_started = True
+        camera.start()
+        camera_started = True
 
         config = AutofocusConfig(
             roi=Roi(x=20, y=20, width=24, height=24),

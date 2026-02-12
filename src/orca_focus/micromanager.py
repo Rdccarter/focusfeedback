@@ -244,6 +244,7 @@ def create_micromanager_frame_source(
     port: int = 4827,
     core: Any | None = None,
     allow_snap_fallback: bool = False,
+    allow_standalone_core: bool = False,
 ) -> MicroManagerFrameSource:
     """Connect to a running Micro-Manager instance."""
     if core is not None:
@@ -253,20 +254,22 @@ def create_micromanager_frame_source(
     if mm_core is not None:
         return MicroManagerFrameSource(core=mm_core, allow_snap_fallback=allow_snap_fallback)
 
-    mm_core = _try_create_pymmcore_core()
-    if mm_core is not None:
-        print(
-            "Warning: using bare MMCore CMMCore(); this core is not attached to a running "
-            "Micro-Manager GUI session and may require loading a hardware config.",
-            file=sys.stderr,
-        )
-        return MicroManagerFrameSource(core=mm_core, allow_snap_fallback=allow_snap_fallback)
+    if allow_standalone_core:
+        mm_core = _try_create_pymmcore_core()
+        if mm_core is not None:
+            print(
+                "Warning: using bare MMCore CMMCore(); this core is not attached to a running "
+                "Micro-Manager GUI session and may require loading a hardware config.",
+                file=sys.stderr,
+            )
+            return MicroManagerFrameSource(core=mm_core, allow_snap_fallback=allow_snap_fallback)
 
     raise RuntimeError(
         "Could not connect to Micro-Manager. Make sure one of these is true:\n"
         "  1. Micro-Manager is running with pycromanager bridge enabled\n"
         "     (Tools -> Options -> Run server on port), or\n"
         "  2. pycromanager can attach via its default local bridge (Core()), or\n"
-        "  3. pymmcore/MMCorePy is available in the Python environment.\n"
+        "  3. (optional) use --mm-allow-standalone-core to allow standalone "
+        "pymmcore/MMCorePy fallback when you are not attaching to MM GUI.\n"
         f"  Tried pycromanager at {host}:{port} and default Core()"
     )

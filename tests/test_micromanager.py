@@ -45,7 +45,11 @@ def test_micromanager_source_falls_back_to_mmcorepy(monkeypatch):
     fake_mmcorepy.CMMCore = lambda: SimpleNamespace(source="mmcorepy")
     monkeypatch.setitem(sys.modules, "MMCorePy", fake_mmcorepy)
 
-    source = create_micromanager_frame_source(host="localhost", port=4827)
+    source = create_micromanager_frame_source(
+        host="localhost",
+        port=4827,
+        allow_standalone_core=True,
+    )
 
     assert source.core.source == "mmcorepy"
 
@@ -59,7 +63,11 @@ def test_micromanager_source_falls_back_to_pymmcore(monkeypatch):
     fake_pymmcore.CMMCore = lambda: SimpleNamespace(source="pymmcore")
     monkeypatch.setitem(sys.modules, "pymmcore", fake_pymmcore)
 
-    source = create_micromanager_frame_source(host="localhost", port=4827)
+    source = create_micromanager_frame_source(
+        host="localhost",
+        port=4827,
+        allow_standalone_core=True,
+    )
 
     assert source.core.source == "pymmcore"
 
@@ -71,10 +79,23 @@ def test_micromanager_source_errors_with_clear_message(monkeypatch):
     fake_mmcorepy = ModuleType("MMCorePy")
     monkeypatch.setitem(sys.modules, "MMCorePy", fake_mmcorepy)
 
-    with pytest.raises(RuntimeError, match=r"default Core\(\)"):
+    with pytest.raises(RuntimeError, match=r"--mm-allow-standalone-core"):
         create_micromanager_frame_source(host="localhost", port=4827)
 
 
+
+
+def test_micromanager_source_does_not_fallback_to_standalone_core_without_opt_in(monkeypatch):
+    fake_py = ModuleType("pycromanager")
+    fake_py.Core = _AlwaysFailCoreFactory()
+    monkeypatch.setitem(sys.modules, "pycromanager", fake_py)
+
+    fake_pymmcore = ModuleType("pymmcore")
+    fake_pymmcore.CMMCore = lambda: SimpleNamespace(source="pymmcore")
+    monkeypatch.setitem(sys.modules, "pymmcore", fake_pymmcore)
+
+    with pytest.raises(RuntimeError, match=r"--mm-allow-standalone-core"):
+        create_micromanager_frame_source(host="localhost", port=4827)
 def test_micromanager_source_uses_metadata_timestamp_and_detects_duplicate_by_token():
     class _TaggedImage:
         def __init__(self, pix, elapsed_ms):
