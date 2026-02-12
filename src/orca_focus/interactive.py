@@ -28,6 +28,8 @@ def _prepare_napari_environment() -> None:
     external plugin auto-discovery keeps core viewer behavior stable.
     """
     os.environ.setdefault("NAPARI_DISABLE_PLUGINS", "1")
+    os.environ.setdefault("NAPARI_DISABLE_PLUGIN_ENTRY_POINTS", "1")
+    os.environ.setdefault("NAPARI_DISABLE_PLUGIN_ENTRYPOINTS", "1")
 
 
 def launch_autofocus_viewer(
@@ -135,15 +137,15 @@ def launch_autofocus_viewer(
         worker.start()
 
     def _on_roi_change(_event=None) -> None:
-        shapes = roi_layer.data
-        if not shapes:
-            return
-        rect = shapes[-1]
         try:
+            shapes = roi_layer.data
+            if not shapes:
+                return
+            rect = shapes[-1]
             roi = _roi_from_rectangle(rect)
-        except Exception:
-            return
-        _start_autofocus(roi)
+            _start_autofocus(roi)
+        except Exception as exc:
+            state["calibration_message"] = f"ROI update failed: {exc}"
 
     def _run_calibration_sweep(roi: Roi) -> None:
         nonlocal current_calibration
@@ -213,8 +215,12 @@ def launch_autofocus_viewer(
     timer = QTimer()
 
     def _refresh() -> None:
-        frame = camera.get_frame()
-        image_layer.data = np.asarray(frame.image)
+        try:
+            frame = camera.get_frame()
+            image_layer.data = np.asarray(frame.image)
+        except Exception as exc:
+            status_text.text = f"Live frame error: {exc}"
+            return
 
         sample = state.get("last_sample")
         if sample is not None:

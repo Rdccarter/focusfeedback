@@ -89,6 +89,7 @@ def test_prepare_napari_environment_sets_disable_plugins(monkeypatch):
     interactive._prepare_napari_environment()
 
     assert os.environ.get("NAPARI_DISABLE_PLUGINS") == "1"
+    assert os.environ.get("NAPARI_DISABLE_PLUGIN_ENTRY_POINTS") == "1"
 
 
 def test_prepare_napari_environment_respects_existing_value(monkeypatch):
@@ -97,3 +98,11 @@ def test_prepare_napari_environment_respects_existing_value(monkeypatch):
     interactive._prepare_napari_environment()
 
     assert os.environ.get("NAPARI_DISABLE_PLUGINS") == "0"
+
+
+def test_prepare_napari_environment_sets_legacy_entrypoints_flag(monkeypatch):
+    monkeypatch.delenv("NAPARI_DISABLE_PLUGIN_ENTRYPOINTS", raising=False)
+
+    interactive._prepare_napari_environment()
+
+    assert os.environ.get("NAPARI_DISABLE_PLUGIN_ENTRYPOINTS") == "1"
