@@ -1,3 +1,4 @@
+import pytest
 import time
 
 from orca_focus.autofocus import AstigmaticAutofocusController, AutofocusConfig, AutofocusWorker
@@ -128,10 +129,21 @@ def test_controller_integrator_freezes_at_stage_limits() -> None:
 
 def test_controller_ema_filter_smooths_error() -> None:
     """With a high alpha the filtered error should lag behind raw changes."""
-    stage = MclNanoZStage()
-    stage.move_z_um(2.0)
-    camera = SimulatedCamera(stage=stage, scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.25))
-    camera.start()
+    stage_raw = MclNanoZStage()
+    stage_raw.move_z_um(2.0)
+    camera_raw = SimulatedCamera(
+        stage=stage_raw,
+        scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.25),
+    )
+    camera_raw.start()
+
+    stage_smooth = MclNanoZStage()
+    stage_smooth.move_z_um(2.0)
+    camera_smooth = SimulatedCamera(
+        stage=stage_smooth,
+        scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.25),
+    )
+    camera_smooth.start()
 
     config_raw = AutofocusConfig(
         roi=Roi(x=20, y=20, width=24, height=24),
@@ -143,11 +155,11 @@ def test_controller_ema_filter_smooths_error() -> None:
     )
 
     ctrl_raw = AstigmaticAutofocusController(
-        camera=camera, stage=stage, config=config_raw,
+        camera=camera_raw, stage=stage_raw, config=config_raw,
         calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
     )
     ctrl_smooth = AstigmaticAutofocusController(
-        camera=camera, stage=stage, config=config_smooth,
+        camera=camera_smooth, stage=stage_smooth, config=config_smooth,
         calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
     )
 
@@ -156,12 +168,13 @@ def test_controller_ema_filter_smooths_error() -> None:
     # First step with no history — both should be identical.
     assert sample_raw.error_um == sample_smooth.error_um
 
-    # After a second step the smoothed error should be attenuated.
+    # After a second step the smoothed error should lag toward the previous value.
     sample_raw2 = ctrl_raw.run_step()
     sample_smooth2 = ctrl_smooth.run_step()
-    assert abs(sample_smooth2.error_um) <= abs(sample_raw2.error_um) + 1e-9
+    assert abs(sample_smooth2.error_um - sample_raw.error_um) < abs(sample_raw2.error_um - sample_raw.error_um)
 
-    camera.stop()
+    camera_raw.stop()
+    camera_smooth.stop()
 
 
 def test_controller_initial_integral() -> None:
@@ -225,3 +238,19 @@ def test_controller_skips_duplicate_frames() -> None:
 
     s3 = controller.run_step()
     assert s3.control_applied is True  # new timestamp → processed
+
+
+def test_controller_rejects_invalid_loop_hz() -> None:
+    stage = MclNanoZStage()
+    camera = SimulatedCamera(stage=stage)
+    camera.start()
+
+    with pytest.raises(ValueError, match="loop_hz must be > 0"):
+        AstigmaticAutofocusController(
+            camera=camera,
+            stage=stage,
+            config=AutofocusConfig(roi=Roi(x=20, y=20, width=24, height=24), loop_hz=0.0),
+            calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
+        )
+
+    camera.stop()
