@@ -236,8 +236,10 @@ class AutofocusWorker:
             self._thread = threading.Thread(target=self._run_loop, daemon=True)
             self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, *, wait: bool = True) -> None:
         self._stop_evt.set()
+        if not wait:
+            return
         with self._lock:
             thread = self._thread
         if thread is not None:

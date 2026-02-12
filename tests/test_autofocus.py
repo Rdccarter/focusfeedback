@@ -254,3 +254,24 @@ def test_controller_rejects_invalid_loop_hz() -> None:
         )
 
     camera.stop()
+
+
+def test_autofocus_worker_stop_nonblocking() -> None:
+    stage = MclNanoZStage()
+    stage.move_z_um(1.0)
+    camera = SimulatedCamera(stage=stage, scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.2))
+    camera.start()
+
+    controller = AstigmaticAutofocusController(
+        camera=camera,
+        stage=stage,
+        config=AutofocusConfig(roi=Roi(x=20, y=20, width=24, height=24), loop_hz=120.0),
+        calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.0),
+    )
+
+    worker = AutofocusWorker(controller=controller)
+    worker.start()
+    worker.stop(wait=False)
+    # allow thread to observe stop event
+    time.sleep(0.01)
+    camera.stop()
