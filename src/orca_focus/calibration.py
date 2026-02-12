@@ -208,13 +208,41 @@ def auto_calibrate(
 
     step = (z_max_um - z_min_um) / float(n_steps - 1)
     out: list[CalibrationSample] = []
+    failed_moves: list[tuple[float, Exception]] = []
     for i in range(n_steps):
-        z = z_min_um + i * step
-        stage.move_z_um(z)
+        target_z = z_min_um + i * step
+        try:
+            stage.move_z_um(target_z)
+        except Exception as exc:
+            failed_moves.append((target_z, exc))
+            continue
+
         frame = camera.get_frame()
         err = astigmatic_error_signal(frame.image, roi)
         weight = roi_total_intensity(frame.image, roi)
-        out.append(CalibrationSample(z_um=z, error=err, weight=max(0.0, weight)))
+
+        # Record where the stage actually ended up (important if hardware clamps).
+        measured_z = target_z
+        try:
+            measured_z = float(stage.get_z_um())
+        except Exception:
+            pass
+
+        out.append(CalibrationSample(z_um=measured_z, error=err, weight=max(0.0, weight)))
+
+    if len(out) < 2:
+        if failed_moves:
+            first_z, first_exc = failed_moves[0]
+            raise RuntimeError(
+                "Calibration sweep could not collect enough valid points: "
+                f"{len(out)} succeeded, {len(failed_moves)} failed. "
+                f"First failed move at z={first_z:+0.3f} um: {first_exc}"
+            ) from first_exc
+        raise RuntimeError(
+            "Calibration sweep could not collect enough valid points; "
+            "need at least 2 successful stage positions."
+        )
+
     return out
 
 
