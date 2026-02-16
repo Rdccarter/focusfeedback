@@ -7,12 +7,14 @@ from pathlib import Path
 from .autofocus import AstigmaticAutofocusController, AutofocusConfig
 from .calibration import (
     FocusCalibration,
+    calibration_quality_issues,
     fit_linear_calibration_with_report,
     load_calibration_samples_csv,
     validate_calibration_sign,
 )
 from .focus_metric import Roi
-from .hardware import HamamatsuOrcaCamera, MclNanoZStage, SimulatedCamera
+from .hardware import HamamatsuOrcaCamera, MclNanoZStage, NotConnectedError, SimulatedCamera
+from .interfaces import StageInterface
 from .interactive import launch_autofocus_viewer
 from .pylablib_camera import create_pylablib_frame_source
 
@@ -38,10 +40,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mm-host", default="localhost", help="Micro-Manager pycromanager host")
     parser.add_argument("--mm-port", type=int, default=4827, help="Micro-Manager pycromanager port")
     parser.add_argument(
+        "--mm-allow-standalone-core",
+        action="store_true",
+        help=(
+            "Allow fallback to standalone pymmcore/MMCorePy CMMCore if bridge attach fails. "
+            "Use only when intentionally running without attaching to MM GUI."
+        ),
+    )
+    parser.add_argument(
         "--stage",
-        choices=["mcl", "simulate"],
+        choices=["mcl", "simulate", "micromanager"],
         default=None,
-        help="Stage backend. In micromanager camera mode this package still controls stage via direct MCL access.",
+        help=(
+            "Stage backend. Defaults: simulate camera -> simulate stage, "
+            "all hardware cameras (including micromanager) -> mcl stage."
+        ),
     )
     parser.add_argument("--stage-dll", default=None, help="Path to MCL stage DLL")
     parser.add_argument(
@@ -49,7 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--kp", type=float, default=0.8, help="Proportional gain")
     parser.add_argument("--ki", type=float, default=0.2, help="Integral gain")
-    parser.add_argument("--max-step", type=float, default=0.2, help="Max correction step in Âµm")
+    parser.add_argument("--max-step", type=float, default=0.2, help="Max correction step in µm")
+    parser.add_argument("--command-deadband-um", type=float, default=0.02, help="Ignore stage corrections smaller than this magnitude (µm) to reduce oscillation")
+    parser.add_argument("--stage-min-um", type=float, default=None, help="Lower clamp for commanded stage Z (µm)")
+    parser.add_argument("--stage-max-um", type=float, default=None, help="Upper clamp for commanded stage Z (µm)")
+    parser.add_argument("--af-max-excursion-um", type=float, default=5.0, help="Max allowed autofocus excursion from initial Z lock point (µm); set negative to disable")
     parser.add_argument(
         "--calibration-csv",
         default="calibration_sweep.csv",
@@ -95,6 +112,12 @@ def _load_startup_calibration(samples_csv: str | None) -> FocusCalibration:
         file=sys.stderr,
     )
 
+    issues = calibration_quality_issues(samples, report)
+    if issues:
+        raise ValueError(
+            "Calibration CSV failed quality checks: " + " ; ".join(issues)
+        )
+
     if report.r2 < 0.9:
         print(
             f"Warning: calibration R^2={report.r2:0.4f} is below 0.9; "
@@ -117,41 +140,74 @@ def _load_startup_calibration(samples_csv: str | None) -> FocusCalibration:
     return report.calibration
 
 
-def _build_camera_and_stage(args):
-    # â”€â”€ Simulated camera + in-memory stage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    if args.camera == "simulate":
+def _build_stage(args, *, mm_core=None) -> StageInterface:
+    stage_backend = args.stage or ("simulate" if args.camera == "simulate" else "mcl")
+
+    if stage_backend == "simulate":
+        if args.stage_dll is not None or args.stage_wrapper is not None:
+            print(
+                "Warning: --stage simulate ignores --stage-dll/--stage-wrapper inputs.",
+                file=sys.stderr,
+            )
+        return MclNanoZStage()
+
+    if stage_backend == "micromanager":
+        if mm_core is None:
+            raise RuntimeError(
+                "Micro-Manager stage backend requested but no Micro-Manager core is available. "
+                "Use --camera micromanager or choose --stage mcl/simulate."
+            )
+        if args.stage_dll is not None or args.stage_wrapper is not None:
+            print(
+                "Warning: --stage micromanager ignores --stage-dll/--stage-wrapper inputs.",
+                file=sys.stderr,
+            )
+        from .micromanager import MicroManagerStage
+
+        return MicroManagerStage(core=mm_core)
+
+    try:
         stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
+    except (NotConnectedError, OSError, FileNotFoundError) as exc:
+        raise RuntimeError(
+            f"Failed to initialize MCL stage: {exc}. "
+            "If the stage is controlled through Micro-Manager, use --stage micromanager. "
+            "To run without hardware stage control, use --stage simulate."
+        ) from exc
+    if args.stage_dll is None and args.stage_wrapper is None:
+        print(
+            "Warning: no explicit MCL stage backend configured; using in-memory simulated stage.",
+            file=sys.stderr,
+        )
+    return stage
+
+
+def _build_camera_and_stage(args):
+    # Simulated camera + in-memory stage
+    if args.camera == "simulate":
+        stage = _build_stage(args)
         stage.move_z_um(1.5)
         camera = SimulatedCamera(stage=stage)
         return camera, stage
 
-    # â”€â”€ Micro-Manager camera stream (MM owns camera only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Micro-Manager camera stream (MM owns camera only)
     if args.camera == "micromanager":
         from .micromanager import create_micromanager_frame_source
 
-        mm_source = create_micromanager_frame_source(host=args.mm_host, port=args.mm_port)
+        mm_source = create_micromanager_frame_source(
+            host=args.mm_host,
+            port=args.mm_port,
+            allow_standalone_core=args.mm_allow_standalone_core,
+        )
+        stage = _build_stage(args, mm_core=mm_source.core)
         camera = HamamatsuOrcaCamera(
             frame_source=mm_source,
             control_source_lifecycle=False,
         )
-        stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
-        if args.stage_dll is None and args.stage_wrapper is None:
-            print(
-                "Warning: micromanager camera selected with no explicit MCL stage backend; "
-                "using in-memory simulated stage.",
-                file=sys.stderr,
-            )
         return camera, stage
 
-    # â”€â”€ pylablib camera (orca / andor) + package-controlled stage â”€â”€â”€
-    stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
-    if args.stage_dll is None and args.stage_wrapper is None:
-        print(
-            "Warning: non-simulated camera selected but no stage backend configured; "
-            "using in-memory simulated stage.",
-            file=sys.stderr,
-        )
-
+    # pylablib camera (orca / andor) + package-controlled stage
+    stage = _build_stage(args)
     frame_source = create_pylablib_frame_source(args.camera, idx=args.camera_index)
     camera = HamamatsuOrcaCamera(frame_source=frame_source, control_source_lifecycle=True)
     return camera, stage
@@ -161,63 +217,67 @@ def main() -> int:
     args = build_parser().parse_args()
 
     camera, stage = _build_camera_and_stage(args)
+    camera_started = False
 
-    # For micromanager mode, don't call start â€” MM owns the camera.
-    if args.camera != "micromanager":
-        camera.start()
-
-    config = AutofocusConfig(
-        roi=Roi(x=20, y=20, width=24, height=24),
-        loop_hz=args.loop_hz,
-        kp=args.kp,
-        ki=args.ki,
-        max_step_um=args.max_step,
-    )
     try:
-        calibration = _load_startup_calibration(args.calibration_csv)
-    except ValueError as exc:
-        if not args.show_live:
-            raise
-        print(f"Warning: {exc}", file=sys.stderr)
-        print(
-            "Warning: using temporary default calibration for live setup only; "
-            "run calibration sweep and restart to use saved calibration.",
-            file=sys.stderr,
-        )
-        calibration = FocusCalibration(error_at_focus=0.0, error_to_um=1.0)
+        camera.start()
+        camera_started = True
 
-    if args.show_live:
-        launch_autofocus_viewer(
-            camera,
-            stage,
+        config = AutofocusConfig(
+            roi=Roi(x=20, y=20, width=24, height=24),
+            loop_hz=args.loop_hz,
+            kp=args.kp,
+            ki=args.ki,
+            max_step_um=args.max_step,
+            stage_min_um=args.stage_min_um,
+            stage_max_um=args.stage_max_um,
+            max_abs_excursion_um=(None if args.af_max_excursion_um < 0 else args.af_max_excursion_um),
+            command_deadband_um=args.command_deadband_um,
+        )
+        try:
+            calibration = _load_startup_calibration(args.calibration_csv)
+        except ValueError as exc:
+            if not args.show_live:
+                raise
+            print(f"Warning: {exc}", file=sys.stderr)
+            print(
+                "Warning: using temporary default calibration for live setup only; "
+                "run calibration sweep and restart to use saved calibration.",
+                file=sys.stderr,
+            )
+            calibration = FocusCalibration(error_at_focus=0.0, error_to_um=1.0)
+
+        if args.show_live:
+            launch_autofocus_viewer(
+                camera,
+                stage,
+                calibration=calibration,
+                default_config=config,
+                calibration_output_path=args.calibration_csv,
+                calibration_half_range_um=args.calibration_half_range_um,
+                calibration_steps=args.calibration_steps,
+            )
+            return 0
+
+        controller = AstigmaticAutofocusController(
+            camera=camera,
+            stage=stage,
+            config=config,
             calibration=calibration,
-            default_config=config,
-            calibration_output_path=args.calibration_csv,
-            calibration_half_range_um=args.calibration_half_range_um,
-            calibration_steps=args.calibration_steps,
         )
-        if args.camera != "micromanager":
-            camera.stop()
+
+        samples = controller.run(duration_s=args.duration)
+
+        if samples:
+            final = samples[-1]
+            print(
+                f"camera={args.camera} steps={len(samples)} final_error={final.error:+0.4f} "
+                f"final_error_um={final.error_um:+0.3f} stage={final.commanded_z_um:+0.3f} um"
+            )
         return 0
-
-    controller = AstigmaticAutofocusController(
-        camera=camera,
-        stage=stage,
-        config=config,
-        calibration=calibration,
-    )
-
-    samples = controller.run(duration_s=args.duration)
-    if args.camera != "micromanager":
-        camera.stop()
-
-    if samples:
-        final = samples[-1]
-        print(
-            f"camera={args.camera} steps={len(samples)} final_error={final.error:+0.4f} "
-            f"final_error_um={final.error_um:+0.3f} stage={final.commanded_z_um:+0.3f} um"
-        )
-    return 0
+    finally:
+        if camera_started:
+            camera.stop()
 
 
 if __name__ == "__main__":
