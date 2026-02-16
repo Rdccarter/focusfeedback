@@ -229,7 +229,15 @@ class MclNanoZStage(StageInterface):
         axis = ctypes.c_uint(self._axis)
         status = int(self._dll.MCL_SingleWriteN(ctypes.c_double(target_z_um), axis, ctypes.c_int(self._handle)))
         if status != 0:
-            raise RuntimeError(f"MCL_SingleWriteN failed with status {status}")
+            hint = ""
+            if status == -6:
+                hint = (
+                    " (status -6 often indicates out-of-range/invalid move; "
+                    "check stage axis selection and autofocus Z clamps)"
+                )
+            raise RuntimeError(
+                f"MCL_SingleWriteN failed with status {status} for target_z_um={target_z_um:+0.6f}, axis={self._axis}.{hint}"
+            )
         self._z_um = target_z_um
 
 
