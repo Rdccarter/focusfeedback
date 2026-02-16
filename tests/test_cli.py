@@ -15,6 +15,9 @@ def test_build_parser_defaults() -> None:
     assert args.show_live is False
     assert args.calibration_csv == "calibration_sweep.csv"
     assert args.mm_allow_standalone_core is False
+    assert args.stage_min_um is None
+    assert args.stage_max_um is None
+    assert args.af_max_excursion_um == 5.0
 
 
 def test_build_parser_stage_accepts_micromanager() -> None:
@@ -197,3 +200,32 @@ def test_load_startup_calibration_rejects_non_monotonic_csv(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="quality checks"):
         _load_startup_calibration(str(csv_path))
+
+
+def test_main_show_live_forwards_af_safety_clamp(tmp_path: Path) -> None:
+    csv_path = tmp_path / "calibration_sweep.csv"
+    csv_path.write_text("z_um,error,weight\n-1.0,-0.5,1\n0.0,0.0,1\n1.0,0.5,1\n", encoding="utf-8")
+
+    class _DummyCamera:
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    with patch(
+        "sys.argv",
+        [
+            "orca-focus",
+            "--show-live",
+            "--calibration-csv",
+            str(csv_path),
+            "--af-max-excursion-um",
+            "2.5",
+        ],
+    ), patch("orca_focus.cli._build_camera_and_stage", return_value=(_DummyCamera(), object())), patch(
+        "orca_focus.cli.launch_autofocus_viewer", return_value=None
+    ) as launch_viewer:
+        assert main() == 0
+
+    assert launch_viewer.call_args.kwargs["af_max_excursion_um"] == pytest.approx(2.5)

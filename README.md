@@ -149,6 +149,9 @@ orca-focus [OPTIONS]
 | `--kp` | `0.8` | Proportional gain |
 | `--ki` | `0.2` | Integral gain |
 | `--max-step` | `0.2` | Max per-step Z command (um) |
+| `--stage-min-um` | none | Hard lower clamp for commanded stage Z (um) |
+| `--stage-max-um` | none | Hard upper clamp for commanded stage Z (um) |
+| `--af-max-excursion-um` | `5.0` | Live-mode fallback clamp around current Z when stage limits are unset |
 | `--calibration-csv` | `calibration_sweep.csv` | Calibration samples CSV path |
 | `--calibration-half-range-um` | `0.75` | Initial GUI half-range seed (um) |
 | `--calibration-steps` | `21` | Initial GUI step-count seed |
@@ -162,6 +165,7 @@ orca-focus [OPTIONS]
   - This usually means the sweep did not produce a valid local linear model around your operating focus.
   - Re-run calibration with a smaller half-range and a stable, centered ROI bead.
   - Confirm the error trend is roughly monotonic over the sweep; avoid very wide sweeps that include non-linear regions.
+  - Set hard limits with `--stage-min-um/--stage-max-um` (or lower `--af-max-excursion-um`) to prevent large absolute Z jumps.
 - **Displayed Z looks off**
   - The viewer now displays `z(now)` from live stage readback when available.
 - **Micro-Manager connection error**

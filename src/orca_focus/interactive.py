@@ -60,6 +60,7 @@ def launch_autofocus_viewer(
     calibration_output_path: str | None = None,
     calibration_half_range_um: float = 0.75,
     calibration_steps: int = 21,
+    af_max_excursion_um: float = 5.0,
 ) -> None:
     """Live napari viewer with interactive ROI selection and background autofocus.
 
@@ -139,6 +140,18 @@ def launch_autofocus_viewer(
             state["last_roi"] = roi
             return
         _stop_worker(wait=False)
+        stage_min = default_config.stage_min_um
+        stage_max = default_config.stage_max_um
+        if stage_min is None or stage_max is None:
+            try:
+                z_now = float(stage.get_z_um())
+                if stage_min is None:
+                    stage_min = z_now - float(af_max_excursion_um)
+                if stage_max is None:
+                    stage_max = z_now + float(af_max_excursion_um)
+            except Exception:
+                pass
+
         config = AutofocusConfig(
             roi=roi,
             loop_hz=default_config.loop_hz,
@@ -146,8 +159,8 @@ def launch_autofocus_viewer(
             ki=default_config.ki,
             max_step_um=default_config.max_step_um,
             integral_limit_um=default_config.integral_limit_um,
-            stage_min_um=default_config.stage_min_um,
-            stage_max_um=default_config.stage_max_um,
+            stage_min_um=stage_min,
+            stage_max_um=stage_max,
             min_roi_intensity=default_config.min_roi_intensity,
             error_alpha=default_config.error_alpha,
             edge_margin_px=default_config.edge_margin_px,

@@ -62,7 +62,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--kp", type=float, default=0.8, help="Proportional gain")
     parser.add_argument("--ki", type=float, default=0.2, help="Integral gain")
-    parser.add_argument("--max-step", type=float, default=0.2, help="Max correction step in Âµm")
+    parser.add_argument("--max-step", type=float, default=0.2, help="Max correction step in µm")
+    parser.add_argument("--stage-min-um", type=float, default=None, help="Lower clamp for commanded stage Z (µm)")
+    parser.add_argument("--stage-max-um", type=float, default=None, help="Upper clamp for commanded stage Z (µm)")
+    parser.add_argument("--af-max-excursion-um", type=float, default=5.0, help="Live-mode fallback clamp around current Z when stage limits are unset")
     parser.add_argument(
         "--calibration-csv",
         default="calibration_sweep.csv",
@@ -225,6 +228,8 @@ def main() -> int:
             kp=args.kp,
             ki=args.ki,
             max_step_um=args.max_step,
+            stage_min_um=args.stage_min_um,
+            stage_max_um=args.stage_max_um,
         )
         try:
             calibration = _load_startup_calibration(args.calibration_csv)
@@ -248,6 +253,7 @@ def main() -> int:
                 calibration_output_path=args.calibration_csv,
                 calibration_half_range_um=args.calibration_half_range_um,
                 calibration_steps=args.calibration_steps,
+                af_max_excursion_um=args.af_max_excursion_um,
             )
             return 0
 
