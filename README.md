@@ -91,6 +91,8 @@ Calibration sweeps move across a Z window and fit a linear mapping:
 
 - `z_offset_um ~= error_to_um * (error - error_at_focus)`
 - Fitting is done against a local Z reference (center of sweep), so calibration remains valid even when absolute stage coordinates are not near 0.
+- The fitted model is used as a **relative move command** (`z_offset_um`), so one calibration can be reused for different beads/targets at different absolute Z positions.
+- At runtime, loaded/GUI-applied calibrations use `control_error_at_focus = 0.0` by design, so the CSV primarily provides slope (move scale + direction) and stays reusable across restarts/targets.
 
 In the viewer, sweep bounds are derived from the nm controls around current Z:
 

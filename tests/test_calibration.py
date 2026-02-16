@@ -41,6 +41,25 @@ def test_fit_linear_calibration_uses_local_z_reference_for_error_at_focus() -> N
     assert calibration_quality_issues(samples, report) == []
 
 
+
+
+def test_fit_linear_calibration_is_invariant_to_absolute_z_shift() -> None:
+    base = [
+        CalibrationSample(z_um=-1.0, error=-0.2),
+        CalibrationSample(z_um=0.0, error=0.0),
+        CalibrationSample(z_um=1.0, error=0.2),
+    ]
+    shifted = [
+        CalibrationSample(z_um=s.z_um + 25.0, error=s.error, weight=s.weight)
+        for s in base
+    ]
+
+    base_cal = fit_linear_calibration(base, robust=True)
+    shifted_cal = fit_linear_calibration(shifted, robust=True)
+
+    assert shifted_cal.error_to_um == pytest.approx(base_cal.error_to_um)
+    assert shifted_cal.error_at_focus == pytest.approx(base_cal.error_at_focus)
+
 def test_fit_linear_calibration_requires_at_least_two_samples() -> None:
     with pytest.raises(ValueError, match="Need at least two calibration samples"):
         fit_linear_calibration([CalibrationSample(z_um=0.0, error=0.0)])

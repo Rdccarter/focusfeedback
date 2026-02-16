@@ -11,10 +11,13 @@ from .interfaces import CameraInterface, StageInterface
 
 @dataclass(slots=True)
 class FocusCalibration:
-    """Maps astigmatic error to physical Z offset.
+    """Maps astigmatic error to physical Z *offset* (command delta).
 
     The mapping follows a local linear approximation around focus:
     z_offset_um ~= error_to_um * (error - error_at_focus)
+
+    Important: this calibration is intentionally relative (how much to move and
+    in which direction), not an absolute Z-position model.
 
     Note: `error_at_focus` is derived from calibration samples and is interpreted
     in the local sweep frame used by the fitter. With symmetric sweeps centered
@@ -164,7 +167,12 @@ def fit_linear_calibration_with_report(
     robust: bool = False,
     outlier_threshold_um: float = 0.2,
 ) -> CalibrationFitReport:
-    """Fit z = slope*error + intercept and return quality metrics."""
+    """Fit a relative offset model and return quality metrics.
+
+    Even when sample `z_um` values are absolute stage positions, fitting is
+    performed in a centered local frame so the resulting calibration remains a
+    command-delta mapping usable across targets at different absolute Z levels.
+    """
 
     # Fit in a local Z frame to avoid large absolute-stage offsets skewing
     # intercept-derived error_at_focus estimates. This keeps slope unchanged.

@@ -230,12 +230,13 @@ def launch_autofocus_viewer(
                     " ; ".join(["Calibration quality check failed"] + issues)
                 )
 
-            current_calibration = report.calibration
+            current_calibration = FocusCalibration(error_at_focus=0.0, error_to_um=report.calibration.error_to_um)
             state["calibration_message"] = (
                 "Calibration complete: "
                 f"{len(samples)} samples saved to {out_path} | "
                 f"slope={report.calibration.error_to_um:+0.4f} um/error, "
-                f"error_at_focus={report.calibration.error_at_focus:+0.4f}, "
+                f"fitted_error_at_focus={report.calibration.error_at_focus:+0.4f}, "
+                "control_error_at_focus=+0.0000, "
                 f"R²={report.r2:0.4f}"
             )
         except Exception as exc:  # pragma: no cover

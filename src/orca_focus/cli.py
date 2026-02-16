@@ -104,10 +104,15 @@ def _load_startup_calibration(samples_csv: str | None) -> FocusCalibration:
 
     samples = load_calibration_samples_csv(csv_path)
     report = fit_linear_calibration_with_report(samples, robust=True)
+    calibration = FocusCalibration(
+        error_at_focus=0.0,
+        error_to_um=report.calibration.error_to_um,
+    )
     print(
         "Loaded calibration "
-        f"({csv_path}): slope={report.calibration.error_to_um:+0.4f} um/error, "
-        f"error_at_focus={report.calibration.error_at_focus:+0.4f}, "
+        f"({csv_path}): slope={calibration.error_to_um:+0.4f} um/error, "
+        f"fitted_error_at_focus={report.calibration.error_at_focus:+0.4f}, "
+        "using_control_error_at_focus=+0.0000, "
         f"R^2={report.r2:0.4f}, inliers={report.n_inliers}/{report.n_samples}",
         file=sys.stderr,
     )
@@ -137,7 +142,49 @@ def _load_startup_calibration(samples_csv: str | None) -> FocusCalibration:
             file=sys.stderr,
         )
 
-    return report.calibration
+    return calibration
+
+
+def _build_stage(args, *, mm_core=None) -> StageInterface:
+    stage_backend = args.stage or ("simulate" if args.camera == "simulate" else "mcl")
+
+    if stage_backend == "simulate":
+        if args.stage_dll is not None or args.stage_wrapper is not None:
+            print(
+                "Warning: --stage simulate ignores --stage-dll/--stage-wrapper inputs.",
+                file=sys.stderr,
+            )
+        return MclNanoZStage()
+
+    if stage_backend == "micromanager":
+        if mm_core is None:
+            raise RuntimeError(
+                "Micro-Manager stage backend requested but no Micro-Manager core is available. "
+                "Use --camera micromanager or choose --stage mcl/simulate."
+            )
+        if args.stage_dll is not None or args.stage_wrapper is not None:
+            print(
+                "Warning: --stage micromanager ignores --stage-dll/--stage-wrapper inputs.",
+                file=sys.stderr,
+            )
+        from .micromanager import MicroManagerStage
+
+        return MicroManagerStage(core=mm_core)
+
+    try:
+        stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
+    except (NotConnectedError, OSError, FileNotFoundError) as exc:
+        raise RuntimeError(
+            f"Failed to initialize MCL stage: {exc}. "
+            "If the stage is controlled through Micro-Manager, use --stage micromanager. "
+            "To run without hardware stage control, use --stage simulate."
+        ) from exc
+    if args.stage_dll is None and args.stage_wrapper is None:
+        print(
+            "Warning: no explicit MCL stage backend configured; using in-memory simulated stage.",
+            file=sys.stderr,
+        )
+    return stage
 
 
 def _build_stage(args, *, mm_core=None) -> StageInterface:

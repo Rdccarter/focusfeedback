@@ -250,3 +250,16 @@ def test_main_forwards_command_deadband(tmp_path: Path) -> None:
 
     config = ctrl_cls.call_args.kwargs["config"]
     assert config.command_deadband_um == 0.05
+
+
+def test_load_startup_calibration_uses_zero_control_error_offset(tmp_path: Path) -> None:
+    csv_path = tmp_path / "calibration_sweep.csv"
+    csv_path.write_text(
+        "z_um,error,weight\n0.0,0.10,1\n1.0,0.20,1\n2.0,0.30,1\n",
+        encoding="utf-8",
+    )
+
+    calibration = _load_startup_calibration(str(csv_path))
+
+    assert calibration.error_to_um == pytest.approx(10.0)
+    assert calibration.error_at_focus == pytest.approx(0.0)
