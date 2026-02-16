@@ -1,3 +1,4 @@
+import pytest
 import time
 
 from orca_focus.autofocus import AstigmaticAutofocusController, AutofocusConfig, AutofocusWorker
@@ -128,10 +129,21 @@ def test_controller_integrator_freezes_at_stage_limits() -> None:
 
 def test_controller_ema_filter_smooths_error() -> None:
     """With a high alpha the filtered error should lag behind raw changes."""
-    stage = MclNanoZStage()
-    stage.move_z_um(2.0)
-    camera = SimulatedCamera(stage=stage, scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.25))
-    camera.start()
+    stage_raw = MclNanoZStage()
+    stage_raw.move_z_um(2.0)
+    camera_raw = SimulatedCamera(
+        stage=stage_raw,
+        scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.25),
+    )
+    camera_raw.start()
+
+    stage_smooth = MclNanoZStage()
+    stage_smooth.move_z_um(2.0)
+    camera_smooth = SimulatedCamera(
+        stage=stage_smooth,
+        scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.25),
+    )
+    camera_smooth.start()
 
     config_raw = AutofocusConfig(
         roi=Roi(x=20, y=20, width=24, height=24),
@@ -143,11 +155,11 @@ def test_controller_ema_filter_smooths_error() -> None:
     )
 
     ctrl_raw = AstigmaticAutofocusController(
-        camera=camera, stage=stage, config=config_raw,
+        camera=camera_raw, stage=stage_raw, config=config_raw,
         calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
     )
     ctrl_smooth = AstigmaticAutofocusController(
-        camera=camera, stage=stage, config=config_smooth,
+        camera=camera_smooth, stage=stage_smooth, config=config_smooth,
         calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
     )
 
@@ -156,12 +168,13 @@ def test_controller_ema_filter_smooths_error() -> None:
     # First step with no history — both should be identical.
     assert sample_raw.error_um == sample_smooth.error_um
 
-    # After a second step the smoothed error should be attenuated.
+    # After a second step the smoothed error should lag toward the previous value.
     sample_raw2 = ctrl_raw.run_step()
     sample_smooth2 = ctrl_smooth.run_step()
-    assert abs(sample_smooth2.error_um) <= abs(sample_raw2.error_um) + 1e-9
+    assert abs(sample_smooth2.error_um - sample_raw.error_um) < abs(sample_raw2.error_um - sample_raw.error_um)
 
-    camera.stop()
+    camera_raw.stop()
+    camera_smooth.stop()
 
 
 def test_controller_initial_integral() -> None:
@@ -217,11 +230,138 @@ def test_controller_skips_duplicate_frames() -> None:
         calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
     )
 
-    s1 = controller.run_step()
-    assert s1.control_applied is True  # first frame is always fresh
+    from unittest.mock import patch
 
-    s2 = controller.run_step()
-    assert s2.control_applied is False  # duplicate timestamp → skipped
+    with patch("orca_focus.autofocus.astigmatic_error_signal", return_value=0.2):
+        s1 = controller.run_step()
+        assert s1.control_applied is True  # first frame is always fresh
 
-    s3 = controller.run_step()
-    assert s3.control_applied is True  # new timestamp → processed
+        s2 = controller.run_step()
+        assert s2.control_applied is False  # duplicate timestamp → skipped
+
+        s3 = controller.run_step()
+        assert s3.control_applied is True  # new timestamp → processed
+
+
+def test_controller_rejects_invalid_loop_hz() -> None:
+    stage = MclNanoZStage()
+    camera = SimulatedCamera(stage=stage)
+    camera.start()
+
+    with pytest.raises(ValueError, match="loop_hz must be > 0"):
+        AstigmaticAutofocusController(
+            camera=camera,
+            stage=stage,
+            config=AutofocusConfig(roi=Roi(x=20, y=20, width=24, height=24), loop_hz=0.0),
+            calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
+        )
+
+    camera.stop()
+
+
+def test_autofocus_worker_stop_nonblocking() -> None:
+    stage = MclNanoZStage()
+    stage.move_z_um(1.0)
+    camera = SimulatedCamera(stage=stage, scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.2))
+    camera.start()
+
+    controller = AstigmaticAutofocusController(
+        camera=camera,
+        stage=stage,
+        config=AutofocusConfig(roi=Roi(x=20, y=20, width=24, height=24), loop_hz=120.0),
+        calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.0),
+    )
+
+    worker = AutofocusWorker(controller=controller)
+    worker.start()
+    worker.stop(wait=False)
+    # allow thread to observe stop event
+    time.sleep(0.01)
+    camera.stop()
+
+
+def test_controller_limits_absolute_excursion_around_initial_lock() -> None:
+    stage = MclNanoZStage()
+    stage.move_z_um(10.0)
+    camera = SimulatedCamera(stage=stage, scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.25))
+    camera.start()
+
+    config = AutofocusConfig(
+        roi=Roi(x=20, y=20, width=24, height=24),
+        kp=1.0,
+        ki=0.0,
+        max_step_um=10.0,
+        max_abs_excursion_um=1.0,
+    )
+    controller = AstigmaticAutofocusController(
+        camera=camera,
+        stage=stage,
+        config=config,
+        calibration=FocusCalibration(error_at_focus=0.0, error_to_um=10.0),
+    )
+
+    sample = controller.run_step(dt_s=0.01)
+    camera.stop()
+
+    assert 9.0 <= sample.commanded_z_um <= 11.0
+
+
+def test_controller_rejects_negative_max_abs_excursion() -> None:
+    stage = MclNanoZStage()
+    camera = SimulatedCamera(stage=stage)
+    camera.start()
+
+    with pytest.raises(ValueError, match="max_abs_excursion_um"):
+        AstigmaticAutofocusController(
+            camera=camera,
+            stage=stage,
+            config=AutofocusConfig(
+                roi=Roi(x=20, y=20, width=24, height=24),
+                max_abs_excursion_um=-0.1,
+            ),
+            calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
+        )
+
+    camera.stop()
+
+
+def test_controller_command_deadband_suppresses_small_moves() -> None:
+    class _Cam:
+        def get_frame(self) -> CameraFrame:
+            return CameraFrame(image=[[1.0] * 64 for _ in range(64)], timestamp_s=1.0)
+
+    class _Stage:
+        def __init__(self) -> None:
+            self.z = 2.0
+            self.moves: list[float] = []
+
+        def get_z_um(self) -> float:
+            return self.z
+
+        def move_z_um(self, z: float) -> None:
+            self.moves.append(z)
+            self.z = z
+
+    stage = _Stage()
+    camera = _Cam()
+    controller = AstigmaticAutofocusController(
+        camera=camera,
+        stage=stage,
+        config=AutofocusConfig(
+            roi=Roi(x=20, y=20, width=24, height=24),
+            kp=1.0,
+            ki=0.0,
+            command_deadband_um=0.05,
+            max_step_um=1.0,
+        ),
+        calibration=FocusCalibration(error_at_focus=0.0, error_to_um=1.0),
+    )
+
+    from unittest.mock import patch
+
+    with patch("orca_focus.autofocus.astigmatic_error_signal", return_value=0.02):
+        sample = controller.run_step(dt_s=0.01)
+
+    assert sample.control_applied is False
+    assert sample.commanded_z_um == pytest.approx(2.0)
+    assert stage.moves == []
