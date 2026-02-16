@@ -90,6 +90,7 @@ AF ON | err=+0.0023  err_um=+0.006  z(now)=+0.312 → cmd=+0.308 um  I=48721
 Calibration sweeps move across a Z window and fit a linear mapping:
 
 - `z_offset_um ~= error_to_um * (error - error_at_focus)`
+- Fitting is done against a local Z reference (center of sweep), so calibration remains valid even when absolute stage coordinates are not near 0.
 
 In the viewer, sweep bounds are derived from the nm controls around current Z:
 

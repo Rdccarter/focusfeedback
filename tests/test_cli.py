@@ -191,10 +191,10 @@ def test_main_starts_micromanager_camera_wrapper_for_get_frame(tmp_path: Path) -
     assert dummy_camera.stopped is True
 
 
-def test_load_startup_calibration_rejects_non_monotonic_csv(tmp_path: Path) -> None:
+def test_load_startup_calibration_rejects_low_signal_csv(tmp_path: Path) -> None:
     csv_path = tmp_path / "calibration_sweep.csv"
     csv_path.write_text(
-        "z_um,error,weight\n0.0,0.10,1\n1.0,0.05,1\n2.0,0.09,1\n3.0,0.14,1\n",
+        "z_um,error,weight\n0.0,0.0100,1\n1.0,0.0105,1\n2.0,0.0110,1\n3.0,0.0102,1\n",
         encoding="utf-8",
     )
 

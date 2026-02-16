@@ -25,6 +25,22 @@ def test_fit_linear_calibration_recovers_mapping() -> None:
     assert abs(cal.error_to_um - 2.0) < 1e-9
 
 
+def test_fit_linear_calibration_uses_local_z_reference_for_error_at_focus() -> None:
+    # Absolute stage position can be far from zero in real microscopes.
+    # Calibration should still estimate a local error-at-focus near sampled errors.
+    samples = [
+        CalibrationSample(z_um=10.0, error=-0.10),
+        CalibrationSample(z_um=11.0, error=0.00),
+        CalibrationSample(z_um=12.0, error=0.10),
+    ]
+
+    report = fit_linear_calibration_with_report(samples, robust=True)
+
+    assert abs(report.calibration.error_to_um - 10.0) < 1e-9
+    assert abs(report.calibration.error_at_focus - 0.0) < 1e-9
+    assert calibration_quality_issues(samples, report) == []
+
+
 def test_fit_linear_calibration_requires_at_least_two_samples() -> None:
     with pytest.raises(ValueError, match="Need at least two calibration samples"):
         fit_linear_calibration([CalibrationSample(z_um=0.0, error=0.0)])

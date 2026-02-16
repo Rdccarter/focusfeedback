@@ -15,6 +15,11 @@ class FocusCalibration:
 
     The mapping follows a local linear approximation around focus:
     z_offset_um ~= error_to_um * (error - error_at_focus)
+
+    Note: `error_at_focus` is derived from calibration samples and is interpreted
+    in the local sweep frame used by the fitter. With symmetric sweeps centered
+    near focus this approximates true best-focus error well. Strongly asymmetric
+    sweeps can bias this estimate; prefer centered bidirectional sweeps.
     """
 
     error_at_focus: float
@@ -66,6 +71,27 @@ def _weighted_linear_fit(samples: list[CalibrationSample]) -> tuple[float, float
     return slope, intercept
 
 
+
+
+def _weighted_z_reference(samples: list[CalibrationSample]) -> float:
+    sum_w = sum(max(0.0, s.weight) for s in samples)
+    if sum_w <= 0:
+        raise ValueError("Calibration sample weights must contain positive mass")
+    return sum(max(0.0, s.weight) * s.z_um for s in samples) / sum_w
+
+
+def _center_samples_on_reference(
+    samples: list[CalibrationSample],
+    z_reference_um: float,
+) -> list[CalibrationSample]:
+    return [
+        CalibrationSample(
+            z_um=s.z_um - z_reference_um,
+            error=s.error,
+            weight=s.weight,
+        )
+        for s in samples
+    ]
 def _robust_seed_fit(samples: list[CalibrationSample]) -> tuple[float, float]:
     if len(samples) < 2:
         raise ValueError("Need at least two calibration samples")
@@ -140,13 +166,21 @@ def fit_linear_calibration_with_report(
 ) -> CalibrationFitReport:
     """Fit z = slope*error + intercept and return quality metrics."""
 
-    slope, intercept = _weighted_linear_fit(samples)
-    n_inliers = len(samples)
+    # Fit in a local Z frame to avoid large absolute-stage offsets skewing
+    # intercept-derived error_at_focus estimates. This keeps slope unchanged.
+    # Caveat: if the sweep is strongly asymmetric around true focus, the local
+    # reference can introduce small bias in error_at_focus (symmetric sweeps are
+    # recommended and are the GUI default).
+    z_reference_um = _weighted_z_reference(samples)
+    centered_samples = _center_samples_on_reference(samples, z_reference_um)
+
+    slope, intercept = _weighted_linear_fit(centered_samples)
+    n_inliers = len(centered_samples)
 
     if robust:
-        seed_slope, seed_intercept = _robust_seed_fit(samples)
+        seed_slope, seed_intercept = _robust_seed_fit(centered_samples)
         inliers: list[CalibrationSample] = []
-        for s in samples:
+        for s in centered_samples:
             pred = seed_slope * s.error + seed_intercept
             if abs(s.z_um - pred) <= outlier_threshold_um:
                 inliers.append(s)
@@ -154,19 +188,19 @@ def fit_linear_calibration_with_report(
             slope, intercept = _weighted_linear_fit(inliers)
             n_inliers = len(inliers)
 
-    metric_samples = samples
-    if robust and n_inliers < len(samples):
-        seed_slope, seed_intercept = _robust_seed_fit(samples)
+    metric_samples = centered_samples
+    if robust and n_inliers < len(centered_samples):
+        seed_slope, seed_intercept = _robust_seed_fit(centered_samples)
         metric_samples = [
             s
-            for s in samples
+            for s in centered_samples
             if abs(s.z_um - (seed_slope * s.error + seed_intercept)) <= outlier_threshold_um
         ]
         if len(metric_samples) < 2:
-            metric_samples = samples
+            metric_samples = centered_samples
 
     return _fit_report(
-        samples,
+        centered_samples,
         slope,
         intercept,
         robust=robust,
