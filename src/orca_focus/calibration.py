@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .focus_metric import Roi, astigmatic_error_signal, roi_total_intensity
 from .interfaces import CameraInterface, StageInterface
@@ -198,6 +199,9 @@ def auto_calibrate(
     z_min_um: float,
     z_max_um: float,
     n_steps: int,
+    bidirectional: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+    on_step: Callable[[int, int, float, float | None, bool], None] | None = None,
 ) -> list[CalibrationSample]:
     """Collect calibration samples from a deterministic stage sweep."""
 
@@ -207,14 +211,56 @@ def auto_calibrate(
         raise ValueError("z_max_um must be greater than z_min_um")
 
     step = (z_max_um - z_min_um) / float(n_steps - 1)
+    forward_targets = [z_min_um + i * step for i in range(n_steps)]
+    targets = forward_targets
+    if bidirectional:
+        targets = forward_targets + list(reversed(forward_targets))
+
     out: list[CalibrationSample] = []
-    for i in range(n_steps):
-        z = z_min_um + i * step
-        stage.move_z_um(z)
+    failed_moves: list[tuple[float, Exception]] = []
+    total_steps = len(targets)
+    for i, target_z in enumerate(targets):
+        if should_stop is not None and should_stop():
+            raise RuntimeError("Calibration cancelled by user")
+
+        step_index = i + 1
+        try:
+            stage.move_z_um(target_z)
+        except Exception as exc:
+            failed_moves.append((target_z, exc))
+            if on_step is not None:
+                on_step(step_index, total_steps, target_z, None, False)
+            continue
+
         frame = camera.get_frame()
         err = astigmatic_error_signal(frame.image, roi)
         weight = roi_total_intensity(frame.image, roi)
-        out.append(CalibrationSample(z_um=z, error=err, weight=max(0.0, weight)))
+
+        # Record where the stage actually ended up (important if hardware clamps).
+        measured_z = target_z
+        try:
+            measured_z = float(stage.get_z_um())
+        except Exception:
+            pass
+
+        if on_step is not None:
+            on_step(step_index, total_steps, target_z, measured_z, True)
+
+        out.append(CalibrationSample(z_um=measured_z, error=err, weight=max(0.0, weight)))
+
+    if len(out) < 2:
+        if failed_moves:
+            first_z, first_exc = failed_moves[0]
+            raise RuntimeError(
+                "Calibration sweep could not collect enough valid points: "
+                f"{len(out)} succeeded, {len(failed_moves)} failed. "
+                f"First failed move at z={first_z:+0.3f} um: {first_exc}"
+            ) from first_exc
+        raise RuntimeError(
+            "Calibration sweep could not collect enough valid points; "
+            "need at least 2 successful stage positions."
+        )
+
     return out
 
 
@@ -246,6 +292,77 @@ def load_calibration_samples_csv(path: str | Path) -> list[CalibrationSample]:
                 )
             )
     return out
+
+
+def _pearson_corr(xs: list[float], ys: list[float]) -> float:
+    if len(xs) != len(ys) or len(xs) < 2:
+        return 0.0
+    x_mean = sum(xs) / len(xs)
+    y_mean = sum(ys) / len(ys)
+    var_x = sum((x - x_mean) ** 2 for x in xs)
+    var_y = sum((y - y_mean) ** 2 for y in ys)
+    if var_x <= 0.0 or var_y <= 0.0:
+        return 0.0
+    cov = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
+    return cov / ((var_x * var_y) ** 0.5)
+
+
+def calibration_quality_issues(
+    samples: list[CalibrationSample],
+    report: CalibrationFitReport,
+    *,
+    min_abs_corr: float = 0.2,
+    min_error_span: float = 0.01,
+    focus_margin_fraction: float = 0.1,
+    max_bidirectional_hysteresis: float = 0.02,
+) -> list[str]:
+    """Return human-readable issues when a sweep is not safely usable for control."""
+
+    if len(samples) < 2:
+        return ["need at least 2 samples"]
+
+    errors = [s.error for s in samples]
+    z_vals = [s.z_um for s in samples]
+    min_err = min(errors)
+    max_err = max(errors)
+    err_span = max_err - min_err
+
+    issues: list[str] = []
+
+    if err_span < min_error_span:
+        issues.append(
+            f"error span too small ({err_span:0.4f}); increase Z range or improve ROI SNR"
+        )
+
+    abs_corr = abs(_pearson_corr(z_vals, errors))
+    if abs_corr < min_abs_corr:
+        # Astigmatic curves are often locally non-linear around lobe transitions.
+        # Keep this as advisory text while relying on fit+range checks for gating.
+        issues.append(
+            f"error-vs-Z is weakly correlated (|corr|={abs_corr:0.3f}); keep ROI centered and reduce sweep range around focus"
+        )
+
+    # For bidirectional sweeps (up/down), the same Z is sampled twice. Ensure
+    # the error signal is reasonably consistent to catch backlash/hysteresis.
+    z_to_errors: dict[float, list[float]] = {}
+    for s in samples:
+        key = round(float(s.z_um), 3)
+        z_to_errors.setdefault(key, []).append(float(s.error))
+    hysteresis_deltas = [max(v) - min(v) for v in z_to_errors.values() if len(v) > 1]
+    if hysteresis_deltas and (max(hysteresis_deltas) > max_bidirectional_hysteresis):
+        issues.append(
+            "up/down sweep mismatch is high (possible backlash or stage settling issue); "
+            "reduce step size, slow sweep, or tighten stage settling"
+        )
+
+    margin = max(1e-9, err_span * focus_margin_fraction)
+    err0 = report.calibration.error_at_focus
+    if err0 < (min_err - margin) or err0 > (max_err + margin):
+        issues.append(
+            "fitted focus lies outside sampled error range; sweep likely does not bracket focus"
+        )
+
+    return issues
 
 
 def validate_calibration_sign(
