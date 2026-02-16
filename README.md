@@ -96,10 +96,11 @@ In the viewer, sweep bounds are derived from the nm controls around current Z:
 - `z_min = z_center - half_range_nm/1000`
 - `z_max = z_center + half_range_nm/1000`
 - `n_steps` computed from span and nm step size
+- each calibration executes an up-and-down (bidirectional) sweep to validate repeatability
 
 The sweep is cancellable and reports per-step target/measured Z. If individual stage moves fail, the sweep can skip bad points; if too few valid points remain, a clear calibration error is raised.
 
-Calibration quality checks now reject sweeps that are not sufficiently monotonic/linear (for example, very wide sweeps that produce a U-shaped error-vs-Z curve). If this happens, reduce half-range and recenter your ROI bead before calibrating again.
+Calibration quality checks are tuned for astigmatic (cylindrical-lens) behavior and now run on a bidirectional sweep (up + down) so backlash/hysteresis can be detected. If quality checks fail, reduce half-range, slow the sweep, and keep the bead centered in ROI.
 
 ### Programmatic calibration example
 

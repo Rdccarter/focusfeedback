@@ -263,7 +263,7 @@ def launch_autofocus_viewer(
         )
         state["calibration_message"] = (
             f"Calibration sweep: {z_min:+0.3f} to {z_max:+0.3f} um "
-            f"in {dynamic_steps} steps (~{effective_step_nm:0.1f} nm step). "
+            f"in {dynamic_steps} steps per pass ({2 * dynamic_steps} total, up+down; ~{effective_step_nm:0.1f} nm step). "
             "Click 'Stop Calibration Sweep' to cancel."
         )
         t = threading.Thread(target=_run_calibration_sweep, args=(roi,), daemon=True)

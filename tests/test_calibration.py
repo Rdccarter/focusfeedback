@@ -81,8 +81,8 @@ def test_auto_calibrate_skips_failed_stage_moves() -> None:
         n_steps=4,
     )
 
-    # Two points should succeed: -0.2 and 0.0
-    assert len(samples) == 2
+    # Forward+reverse sweep repeats successful points in both directions.
+    assert len(samples) == 4
 
 
 def test_auto_calibrate_raises_clear_error_if_too_many_moves_fail() -> None:
@@ -160,9 +160,9 @@ def test_auto_calibrate_reports_step_progress() -> None:
         ),
     )
 
-    assert len(events) == 3
-    assert [event[0] for event in events] == [1, 2, 3]
-    assert all(event[1] == 3 for event in events)
+    assert len(events) == 6
+    assert [event[0] for event in events] == [1, 2, 3, 4, 5, 6]
+    assert all(event[1] == 6 for event in events)
     assert all(event[4] is True for event in events)
 
 
@@ -175,9 +175,9 @@ def test_calibration_quality_issues_flags_non_monotonic_sweeps() -> None:
     ]
     report = fit_linear_calibration_with_report(samples, robust=True)
 
-    issues = calibration_quality_issues(samples, report)
+    issues = calibration_quality_issues(samples, report, min_abs_corr=0.9)
 
-    assert any("not monotonic" in issue for issue in issues)
+    assert any("weakly correlated" in issue for issue in issues)
 
 
 def test_calibration_quality_issues_accepts_well_behaved_sweep() -> None:
@@ -189,3 +189,19 @@ def test_calibration_quality_issues_accepts_well_behaved_sweep() -> None:
     report = fit_linear_calibration_with_report(samples, robust=True)
 
     assert calibration_quality_issues(samples, report) == []
+
+
+def test_calibration_quality_issues_flags_bidirectional_hysteresis() -> None:
+    samples = [
+        CalibrationSample(z_um=-0.5, error=-0.20),
+        CalibrationSample(z_um=0.0, error=0.00),
+        CalibrationSample(z_um=0.5, error=0.20),
+        CalibrationSample(z_um=0.5, error=0.26),
+        CalibrationSample(z_um=0.0, error=0.04),
+        CalibrationSample(z_um=-0.5, error=-0.16),
+    ]
+    report = fit_linear_calibration_with_report(samples, robust=True)
+
+    issues = calibration_quality_issues(samples, report)
+
+    assert any("up/down sweep mismatch" in issue for issue in issues)
