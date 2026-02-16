@@ -205,3 +205,20 @@ def test_calibration_quality_issues_flags_bidirectional_hysteresis() -> None:
     issues = calibration_quality_issues(samples, report)
 
     assert any("up/down sweep mismatch" in issue for issue in issues)
+
+
+def test_calibration_quality_issues_tolerates_small_focus_extrapolation() -> None:
+    samples = [
+        CalibrationSample(z_um=-0.5, error=-0.030),
+        CalibrationSample(z_um=0.0, error=-0.010),
+        CalibrationSample(z_um=0.5, error=0.010),
+        CalibrationSample(z_um=1.0, error=0.030),
+    ]
+    report = fit_linear_calibration_with_report(samples, robust=True)
+
+    # Nudge fitted center just outside sampled range to emulate small noisy extrapolation.
+    report.calibration.error_at_focus = 0.035
+
+    issues = calibration_quality_issues(samples, report)
+
+    assert not any("outside sampled error range" in issue for issue in issues)

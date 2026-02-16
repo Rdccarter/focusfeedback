@@ -355,9 +355,15 @@ def calibration_quality_issues(
             "reduce step size, slow sweep, or tighten stage settling"
         )
 
-    margin = max(1e-9, err_span * focus_margin_fraction)
     err0 = report.calibration.error_at_focus
-    if err0 < (min_err - margin) or err0 > (max_err + margin):
+    nearest_err_dist = min(abs(err - err0) for err in errors)
+    # Be tolerant to slightly out-of-range fitted centers: astigmatic curves can
+    # be asymmetric/noisy near the lobe crossover even when focus is bracketed.
+    margin = max(0.02, err_span * focus_margin_fraction)
+    near_focus_tolerance = max(0.02, err_span * 0.25)
+    if (err0 < (min_err - margin) or err0 > (max_err + margin)) and (
+        nearest_err_dist > near_focus_tolerance
+    ):
         issues.append(
             "fitted focus lies outside sampled error range; sweep likely does not bracket focus"
         )
