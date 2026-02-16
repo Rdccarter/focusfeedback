@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ from .interfaces import CameraInterface, StageInterface
 class AutofocusConfig:
     roi: Roi
     loop_hz: float = 30.0
+    # Cap effective control-step dt to avoid large corrective jumps after
+    # temporary stalls (GUI pauses, GC, device hiccups).
+    max_dt_s: float = 0.2
     # PI control gains, in units of um of stage command per um equivalent error.
     kp: float = 0.6
     ki: float = 0.15
@@ -21,6 +25,8 @@ class AutofocusConfig:
     integral_limit_um: float = 2.0
     stage_min_um: float | None = None
     stage_max_um: float | None = None
+    # Safety clamp around initial lock position to avoid runaway absolute jumps.
+    max_abs_excursion_um: float | None = 5.0
     # Freeze control updates when ROI total intensity drops below threshold.
     min_roi_intensity: float | None = None
     # Exponential moving average smoothing factor for the error signal.
@@ -29,6 +35,9 @@ class AutofocusConfig:
     # Reject frames when PSF centroid is within this many pixels of the ROI
     # boundary, to avoid biased second moments from a truncated PSF.
     edge_margin_px: float = 0.0
+    # Do not issue stage moves smaller than this threshold (um) to reduce
+    # high-frequency dithering/oscillation near focus.
+    command_deadband_um: float = 0.02
 
 
 @dataclass(slots=True)
@@ -62,10 +71,12 @@ class AstigmaticAutofocusController:
         self._camera = camera
         self._stage = stage
         self._config = config
+        self._validate_config()
         self._calibration = calibration
         self._integral_um = initial_integral_um
         self._filtered_error_um: float | None = None
         self._last_frame_ts: float | None = None
+        self._z_lock_center_um: float | None = None
 
     @property
     def loop_hz(self) -> float:
@@ -79,7 +90,28 @@ class AstigmaticAutofocusController:
     def calibration(self, value: FocusCalibration) -> None:
         self._calibration = value
 
+    def _validate_config(self) -> None:
+        if self._config.loop_hz <= 0:
+            raise ValueError("loop_hz must be > 0")
+        if self._config.max_dt_s <= 0:
+            raise ValueError("max_dt_s must be > 0")
+        if self._config.max_step_um < 0:
+            raise ValueError("max_step_um must be >= 0")
+        if self._config.integral_limit_um < 0:
+            raise ValueError("integral_limit_um must be >= 0")
+        if not 0.0 <= self._config.error_alpha <= 1.0:
+            raise ValueError("error_alpha must be in [0.0, 1.0]")
+        if self._config.edge_margin_px < 0:
+            raise ValueError("edge_margin_px must be >= 0")
+        if self._config.max_abs_excursion_um is not None and self._config.max_abs_excursion_um < 0:
+            raise ValueError("max_abs_excursion_um must be >= 0 when provided")
+        if self._config.command_deadband_um < 0:
+            raise ValueError("command_deadband_um must be >= 0")
+
     def _apply_limits(self, target_z_um: float) -> float:
+        if self._z_lock_center_um is not None and self._config.max_abs_excursion_um is not None:
+            excursion = float(self._config.max_abs_excursion_um)
+            target_z_um = max(self._z_lock_center_um - excursion, min(self._z_lock_center_um + excursion, target_z_um))
         if self._config.stage_min_um is not None:
             target_z_um = max(self._config.stage_min_um, target_z_um)
         if self._config.stage_max_um is not None:
@@ -89,6 +121,8 @@ class AstigmaticAutofocusController:
     def run_step(self, dt_s: float | None = None) -> AutofocusSample:
         frame = self._camera.get_frame()
         current_z = self._stage.get_z_um()
+        if self._z_lock_center_um is None:
+            self._z_lock_center_um = float(current_z)
 
         # Guard: skip duplicate frames (same timestamp as previous).
         # This prevents acting on stale data when the camera buffer stalls,
@@ -135,6 +169,8 @@ class AstigmaticAutofocusController:
 
         error = astigmatic_error_signal(frame.image, self._config.roi)
         error_um = self._calibration.error_to_z_offset_um(error)
+        if not math.isfinite(float(error_um)):
+            raise RuntimeError("Non-finite autofocus error encountered; check ROI/calibration")
 
         # Optional exponential moving average on the error signal.
         alpha = self._config.error_alpha
@@ -144,6 +180,7 @@ class AstigmaticAutofocusController:
 
         if dt_s is None:
             dt_s = 1.0 / self._config.loop_hz
+        dt_s = max(0.0, min(float(dt_s), self._config.max_dt_s))
 
         self._integral_um += error_um * dt_s
         self._integral_um = max(
@@ -153,6 +190,24 @@ class AstigmaticAutofocusController:
 
         correction = -(self._config.kp * error_um + self._config.ki * self._integral_um)
         correction = max(-self._config.max_step_um, min(self._config.max_step_um, correction))
+
+        if abs(correction) <= self._config.command_deadband_um:
+            # Anti-chatter: ignore tiny corrections that mostly reflect metric
+            # noise near lock and undo this step's integral accumulation.
+            self._integral_um -= error_um * dt_s
+            self._integral_um = max(
+                -self._config.integral_limit_um,
+                min(self._config.integral_limit_um, self._integral_um),
+            )
+            return AutofocusSample(
+                timestamp_s=frame.timestamp_s,
+                error=error,
+                error_um=error_um,
+                stage_z_um=current_z,
+                commanded_z_um=current_z,
+                roi_total_intensity=total_intensity,
+                control_applied=False,
+            )
 
         raw_target = current_z + correction
         commanded_z = self._apply_limits(raw_target)
@@ -223,8 +278,10 @@ class AutofocusWorker:
             self._thread = threading.Thread(target=self._run_loop, daemon=True)
             self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, *, wait: bool = True) -> None:
         self._stop_evt.set()
+        if not wait:
+            return
         with self._lock:
             thread = self._thread
         if thread is not None:
