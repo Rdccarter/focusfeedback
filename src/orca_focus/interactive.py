@@ -18,7 +18,7 @@ from .calibration import (
     fit_linear_calibration_with_report,
     save_calibration_samples_csv,
 )
-from .focus_metric import Roi
+from .focus_metric import Roi, astigmatic_error_signal
 from .interfaces import CameraInterface, StageInterface
 
 
@@ -49,6 +49,31 @@ def _calibration_plan_from_nm(center_z_um: float, half_range_nm: float, step_nm:
     effective_step_nm = span_nm / float(n_steps - 1)
     return z_min, z_max, n_steps, effective_step_nm
 
+
+
+
+def _build_runtime_calibration_for_roi(
+    camera: CameraInterface,
+    roi: Roi,
+    base_calibration: FocusCalibration,
+) -> FocusCalibration:
+    """Build a per-ROI runtime calibration anchored to current measured error.
+
+    This keeps slope (move scale/direction) from the saved calibration while
+    re-referencing error_at_focus for the current target to reduce jumps when
+    users move ROI to a different bead.
+    """
+
+    try:
+        frame = camera.get_frame()
+        current_error = float(astigmatic_error_signal(frame.image, roi))
+    except Exception:
+        return base_calibration
+
+    return FocusCalibration(
+        error_at_focus=current_error,
+        error_to_um=base_calibration.error_to_um,
+    )
 
 def launch_autofocus_viewer(
     camera: CameraInterface,
@@ -153,11 +178,16 @@ def launch_autofocus_viewer(
             error_alpha=default_config.error_alpha,
             edge_margin_px=default_config.edge_margin_px,
         )
+        runtime_calibration = _build_runtime_calibration_for_roi(
+            camera=camera,
+            roi=roi,
+            base_calibration=current_calibration,
+        )
         controller = AstigmaticAutofocusController(
             camera=camera,
             stage=stage,
             config=config,
-            calibration=current_calibration,
+            calibration=runtime_calibration,
         )
         worker = AutofocusWorker(controller=controller, on_sample=_on_sample)
         state["worker"] = worker

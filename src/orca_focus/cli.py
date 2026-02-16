@@ -187,48 +187,6 @@ def _build_stage(args, *, mm_core=None) -> StageInterface:
     return stage
 
 
-def _build_stage(args, *, mm_core=None) -> StageInterface:
-    stage_backend = args.stage or ("simulate" if args.camera == "simulate" else "mcl")
-
-    if stage_backend == "simulate":
-        if args.stage_dll is not None or args.stage_wrapper is not None:
-            print(
-                "Warning: --stage simulate ignores --stage-dll/--stage-wrapper inputs.",
-                file=sys.stderr,
-            )
-        return MclNanoZStage()
-
-    if stage_backend == "micromanager":
-        if mm_core is None:
-            raise RuntimeError(
-                "Micro-Manager stage backend requested but no Micro-Manager core is available. "
-                "Use --camera micromanager or choose --stage mcl/simulate."
-            )
-        if args.stage_dll is not None or args.stage_wrapper is not None:
-            print(
-                "Warning: --stage micromanager ignores --stage-dll/--stage-wrapper inputs.",
-                file=sys.stderr,
-            )
-        from .micromanager import MicroManagerStage
-
-        return MicroManagerStage(core=mm_core)
-
-    try:
-        stage = MclNanoZStage(dll_path=args.stage_dll, wrapper_module=args.stage_wrapper)
-    except (NotConnectedError, OSError, FileNotFoundError) as exc:
-        raise RuntimeError(
-            f"Failed to initialize MCL stage: {exc}. "
-            "If the stage is controlled through Micro-Manager, use --stage micromanager. "
-            "To run without hardware stage control, use --stage simulate."
-        ) from exc
-    if args.stage_dll is None and args.stage_wrapper is None:
-        print(
-            "Warning: no explicit MCL stage backend configured; using in-memory simulated stage.",
-            file=sys.stderr,
-        )
-    return stage
-
-
 def _build_camera_and_stage(args):
     # Simulated camera + in-memory stage
     if args.camera == "simulate":
