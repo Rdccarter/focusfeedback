@@ -202,30 +202,26 @@ def test_load_startup_calibration_rejects_non_monotonic_csv(tmp_path: Path) -> N
         _load_startup_calibration(str(csv_path))
 
 
-def test_main_show_live_forwards_af_safety_clamp(tmp_path: Path) -> None:
+
+
+def test_main_maps_negative_af_max_excursion_to_none(tmp_path: Path) -> None:
     csv_path = tmp_path / "calibration_sweep.csv"
     csv_path.write_text("z_um,error,weight\n-1.0,-0.5,1\n0.0,0.0,1\n1.0,0.5,1\n", encoding="utf-8")
-
-    class _DummyCamera:
-        def start(self) -> None:
-            return None
-
-        def stop(self) -> None:
-            return None
 
     with patch(
         "sys.argv",
         [
             "orca-focus",
-            "--show-live",
+            "--duration",
+            "0.01",
+            "--af-max-excursion-um",
+            "-1",
             "--calibration-csv",
             str(csv_path),
-            "--af-max-excursion-um",
-            "2.5",
         ],
-    ), patch("orca_focus.cli._build_camera_and_stage", return_value=(_DummyCamera(), object())), patch(
-        "orca_focus.cli.launch_autofocus_viewer", return_value=None
-    ) as launch_viewer:
+    ), patch("orca_focus.cli.AstigmaticAutofocusController") as ctrl_cls:
+        ctrl_cls.return_value.run.return_value = []
         assert main() == 0
 
-    assert launch_viewer.call_args.kwargs["af_max_excursion_um"] == pytest.approx(2.5)
+    config = ctrl_cls.call_args.kwargs["config"]
+    assert config.max_abs_excursion_um is None

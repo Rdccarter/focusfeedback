@@ -151,7 +151,7 @@ orca-focus [OPTIONS]
 | `--max-step` | `0.2` | Max per-step Z command (um) |
 | `--stage-min-um` | none | Hard lower clamp for commanded stage Z (um) |
 | `--stage-max-um` | none | Hard upper clamp for commanded stage Z (um) |
-| `--af-max-excursion-um` | `5.0` | Live-mode fallback clamp around current Z when stage limits are unset |
+| `--af-max-excursion-um` | `5.0` | Max autofocus excursion from initial lock Z (um); set negative to disable this clamp |
 | `--calibration-csv` | `calibration_sweep.csv` | Calibration samples CSV path |
 | `--calibration-half-range-um` | `0.75` | Initial GUI half-range seed (um) |
 | `--calibration-steps` | `21` | Initial GUI step-count seed |
@@ -166,6 +166,7 @@ orca-focus [OPTIONS]
   - Re-run calibration with a smaller half-range and a stable, centered ROI bead.
   - Confirm the error trend is roughly monotonic over the sweep; avoid very wide sweeps that include non-linear regions.
   - Set hard limits with `--stage-min-um/--stage-max-um` (or lower `--af-max-excursion-um`) to prevent large absolute Z jumps.
+  - Status `-6` from `MCL_SingleWriteN` usually indicates out-of-range/invalid moves; verify stage axis and clamp settings.
 - **Displayed Z looks off**
   - The viewer now displays `z(now)` from live stage readback when available.
 - **Micro-Manager connection error**

@@ -21,6 +21,8 @@ class AutofocusConfig:
     integral_limit_um: float = 2.0
     stage_min_um: float | None = None
     stage_max_um: float | None = None
+    # Safety clamp around initial lock position to avoid runaway absolute jumps.
+    max_abs_excursion_um: float | None = 5.0
     # Freeze control updates when ROI total intensity drops below threshold.
     min_roi_intensity: float | None = None
     # Exponential moving average smoothing factor for the error signal.
@@ -67,6 +69,7 @@ class AstigmaticAutofocusController:
         self._integral_um = initial_integral_um
         self._filtered_error_um: float | None = None
         self._last_frame_ts: float | None = None
+        self._z_lock_center_um: float | None = None
 
     @property
     def loop_hz(self) -> float:
@@ -91,8 +94,13 @@ class AstigmaticAutofocusController:
             raise ValueError("error_alpha must be in [0.0, 1.0]")
         if self._config.edge_margin_px < 0:
             raise ValueError("edge_margin_px must be >= 0")
+        if self._config.max_abs_excursion_um is not None and self._config.max_abs_excursion_um < 0:
+            raise ValueError("max_abs_excursion_um must be >= 0 when provided")
 
     def _apply_limits(self, target_z_um: float) -> float:
+        if self._z_lock_center_um is not None and self._config.max_abs_excursion_um is not None:
+            excursion = float(self._config.max_abs_excursion_um)
+            target_z_um = max(self._z_lock_center_um - excursion, min(self._z_lock_center_um + excursion, target_z_um))
         if self._config.stage_min_um is not None:
             target_z_um = max(self._config.stage_min_um, target_z_um)
         if self._config.stage_max_um is not None:
@@ -102,6 +110,8 @@ class AstigmaticAutofocusController:
     def run_step(self, dt_s: float | None = None) -> AutofocusSample:
         frame = self._camera.get_frame()
         current_z = self._stage.get_z_um()
+        if self._z_lock_center_um is None:
+            self._z_lock_center_um = float(current_z)
 
         # Guard: skip duplicate frames (same timestamp as previous).
         # This prevents acting on stale data when the camera buffer stalls,
