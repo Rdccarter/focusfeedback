@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run astigmatic autofocus loop")
     parser.add_argument("--duration", type=float, default=2.0, help="Loop runtime in seconds")
     parser.add_argument("--loop-hz", type=float, default=30.0, help="Control loop frequency")
+    parser.add_argument("--max-dt-s", type=float, default=0.2, help="Maximum effective control dt per step (s) to limit jump after stalls")
     parser.add_argument(
         "--show-live",
         action="store_true",
@@ -231,6 +232,7 @@ def main() -> int:
         config = AutofocusConfig(
             roi=Roi(x=20, y=20, width=24, height=24),
             loop_hz=args.loop_hz,
+            max_dt_s=args.max_dt_s,
             kp=args.kp,
             ki=args.ki,
             max_step_um=args.max_step,

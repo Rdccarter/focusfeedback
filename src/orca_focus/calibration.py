@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -50,6 +51,26 @@ class CalibrationFitReport:
     robust: bool
 
 
+
+
+def _sanitize_calibration_samples(samples: list[CalibrationSample]) -> list[CalibrationSample]:
+    if len(samples) < 2:
+        raise ValueError("Need at least two calibration samples")
+
+    sanitized: list[CalibrationSample] = []
+    for s in samples:
+        if (not math.isfinite(float(s.z_um))) or (not math.isfinite(float(s.error))) or (not math.isfinite(float(s.weight))):
+            continue
+        sanitized.append(s)
+
+    if len(sanitized) < 2:
+        raise ValueError("Need at least two finite calibration samples")
+
+    unique_errors = len({round(float(s.error), 12) for s in sanitized})
+    if unique_errors < 2:
+        raise ValueError("Calibration samples are degenerate")
+
+    return sanitized
 def _weighted_linear_fit(samples: list[CalibrationSample]) -> tuple[float, float]:
     if len(samples) < 2:
         raise ValueError("Need at least two calibration samples")
@@ -95,6 +116,8 @@ def _center_samples_on_reference(
         )
         for s in samples
     ]
+
+
 def _robust_seed_fit(samples: list[CalibrationSample]) -> tuple[float, float]:
     if len(samples) < 2:
         raise ValueError("Need at least two calibration samples")
@@ -173,6 +196,8 @@ def fit_linear_calibration_with_report(
     performed in a centered local frame so the resulting calibration remains a
     command-delta mapping usable across targets at different absolute Z levels.
     """
+
+    samples = _sanitize_calibration_samples(samples)
 
     # Fit in a local Z frame to avoid large absolute-stage offsets skewing
     # intercept-derived error_at_focus estimates. This keeps slope unchanged.

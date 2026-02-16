@@ -11,6 +11,7 @@ def test_build_parser_defaults() -> None:
 
     assert args.duration == 2.0
     assert args.loop_hz == 30.0
+    assert args.max_dt_s == 0.2
     assert args.camera == "simulate"
     assert args.show_live is False
     assert args.calibration_csv == "calibration_sweep.csv"
@@ -263,3 +264,26 @@ def test_load_startup_calibration_uses_zero_control_error_offset(tmp_path: Path)
 
     assert calibration.error_to_um == pytest.approx(10.0)
     assert calibration.error_at_focus == pytest.approx(0.0)
+
+
+def test_main_forwards_max_dt_s(tmp_path: Path) -> None:
+    csv_path = tmp_path / "calibration_sweep.csv"
+    csv_path.write_text("z_um,error,weight\n-1.0,-0.5,1\n0.0,0.0,1\n1.0,0.5,1\n", encoding="utf-8")
+
+    with patch(
+        "sys.argv",
+        [
+            "orca-focus",
+            "--duration",
+            "0.01",
+            "--max-dt-s",
+            "0.05",
+            "--calibration-csv",
+            str(csv_path),
+        ],
+    ), patch("orca_focus.cli.AstigmaticAutofocusController") as ctrl_cls:
+        ctrl_cls.return_value.run.return_value = []
+        assert main() == 0
+
+    config = ctrl_cls.call_args.kwargs["config"]
+    assert config.max_dt_s == 0.05

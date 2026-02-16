@@ -257,3 +257,18 @@ def test_calibration_quality_issues_tolerates_small_focus_extrapolation() -> Non
     issues = calibration_quality_issues(samples, report)
 
     assert not any("outside sampled error range" in issue for issue in issues)
+
+
+def test_fit_linear_calibration_ignores_non_finite_samples() -> None:
+    samples = [
+        CalibrationSample(z_um=-1.0, error=-0.5),
+        CalibrationSample(z_um=0.0, error=0.0),
+        CalibrationSample(z_um=1.0, error=0.5),
+        CalibrationSample(z_um=float("nan"), error=0.1),
+        CalibrationSample(z_um=2.0, error=float("inf")),
+    ]
+
+    cal = fit_linear_calibration(samples, robust=True)
+
+    assert cal.error_to_um == pytest.approx(2.0)
+    assert cal.error_at_focus == pytest.approx(0.0)

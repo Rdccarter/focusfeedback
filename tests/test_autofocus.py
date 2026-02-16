@@ -365,3 +365,53 @@ def test_controller_command_deadband_suppresses_small_moves() -> None:
     assert sample.control_applied is False
     assert sample.commanded_z_um == pytest.approx(2.0)
     assert stage.moves == []
+
+
+def test_controller_clamps_large_dt_for_stability() -> None:
+    stage = MclNanoZStage()
+    stage.move_z_um(1.0)
+    camera = SimulatedCamera(stage=stage, scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.25))
+    camera.start()
+
+    controller = AstigmaticAutofocusController(
+        camera=camera,
+        stage=stage,
+        config=AutofocusConfig(
+            roi=Roi(x=20, y=20, width=24, height=24),
+            kp=0.0,
+            ki=1.0,
+            max_dt_s=0.02,
+            max_step_um=10.0,
+            command_deadband_um=0.0,
+        ),
+        calibration=FocusCalibration(error_at_focus=0.0, error_to_um=1.0),
+    )
+
+    from unittest.mock import patch
+
+    with patch("orca_focus.autofocus.astigmatic_error_signal", return_value=1.0):
+        controller.run_step(dt_s=1.0)
+
+    integral = controller._integral_um  # noqa: SLF001
+    camera.stop()
+
+    assert integral == pytest.approx(0.02)
+
+
+def test_controller_rejects_invalid_max_dt_s() -> None:
+    stage = MclNanoZStage()
+    camera = SimulatedCamera(stage=stage)
+    camera.start()
+
+    with pytest.raises(ValueError, match="max_dt_s"):
+        AstigmaticAutofocusController(
+            camera=camera,
+            stage=stage,
+            config=AutofocusConfig(
+                roi=Roi(x=20, y=20, width=24, height=24),
+                max_dt_s=0.0,
+            ),
+            calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
+        )
+
+    camera.stop()

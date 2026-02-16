@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ from .interfaces import CameraInterface, StageInterface
 class AutofocusConfig:
     roi: Roi
     loop_hz: float = 30.0
+    # Cap effective control-step dt to avoid large corrective jumps after
+    # temporary stalls (GUI pauses, GC, device hiccups).
+    max_dt_s: float = 0.2
     # PI control gains, in units of um of stage command per um equivalent error.
     kp: float = 0.6
     ki: float = 0.15
@@ -89,6 +93,8 @@ class AstigmaticAutofocusController:
     def _validate_config(self) -> None:
         if self._config.loop_hz <= 0:
             raise ValueError("loop_hz must be > 0")
+        if self._config.max_dt_s <= 0:
+            raise ValueError("max_dt_s must be > 0")
         if self._config.max_step_um < 0:
             raise ValueError("max_step_um must be >= 0")
         if self._config.integral_limit_um < 0:
@@ -163,6 +169,8 @@ class AstigmaticAutofocusController:
 
         error = astigmatic_error_signal(frame.image, self._config.roi)
         error_um = self._calibration.error_to_z_offset_um(error)
+        if not math.isfinite(float(error_um)):
+            raise RuntimeError("Non-finite autofocus error encountered; check ROI/calibration")
 
         # Optional exponential moving average on the error signal.
         alpha = self._config.error_alpha
@@ -172,6 +180,7 @@ class AstigmaticAutofocusController:
 
         if dt_s is None:
             dt_s = 1.0 / self._config.loop_hz
+        dt_s = max(0.0, min(float(dt_s), self._config.max_dt_s))
 
         self._integral_um += error_um * dt_s
         self._integral_um = max(

@@ -151,6 +151,7 @@ orca-focus [OPTIONS]
 | `--show-live` | off | Open interactive napari viewer |
 | `--duration` | `2.0` | Headless autofocus runtime (s) |
 | `--loop-hz` | `30.0` | Control loop rate |
+| `--max-dt-s` | `0.2` | Maximum effective control dt per step (s) to limit large corrective jumps after stalls |
 | `--kp` | `0.8` | Proportional gain |
 | `--ki` | `0.2` | Integral gain |
 | `--max-step` | `0.2` | Max per-step Z command (um) |
@@ -173,6 +174,7 @@ orca-focus [OPTIONS]
   - Confirm the error trend is roughly monotonic over the sweep; avoid very wide sweeps that include non-linear regions.
   - Set hard limits with `--stage-min-um/--stage-max-um` (or lower `--af-max-excursion-um`) to prevent large absolute Z jumps.
   - If Z chatters around focus, increase `--command-deadband-um` (for example to `0.03`–`0.08`).
+  - If occasional stalls cause large correction jumps, lower `--max-dt-s` (for example `0.05`–`0.1`).
   - Status `-6` from `MCL_SingleWriteN` usually indicates out-of-range/invalid moves; verify stage axis and clamp settings.
 - **Displayed Z looks off**
   - The viewer now displays `z(now)` from live stage readback when available.
