@@ -3,7 +3,9 @@ import pytest
 from orca_focus.calibration import (
     CalibrationSample,
     auto_calibrate,
+    calibration_quality_issues,
     fit_linear_calibration,
+    fit_linear_calibration_with_report,
     load_calibration_samples_csv,
     save_calibration_samples_csv,
 )
@@ -162,3 +164,28 @@ def test_auto_calibrate_reports_step_progress() -> None:
     assert [event[0] for event in events] == [1, 2, 3]
     assert all(event[1] == 3 for event in events)
     assert all(event[4] is True for event in events)
+
+
+def test_calibration_quality_issues_flags_non_monotonic_sweeps() -> None:
+    samples = [
+        CalibrationSample(z_um=0.0, error=0.10),
+        CalibrationSample(z_um=1.0, error=0.05),
+        CalibrationSample(z_um=2.0, error=0.09),
+        CalibrationSample(z_um=3.0, error=0.14),
+    ]
+    report = fit_linear_calibration_with_report(samples, robust=True)
+
+    issues = calibration_quality_issues(samples, report)
+
+    assert any("not monotonic" in issue for issue in issues)
+
+
+def test_calibration_quality_issues_accepts_well_behaved_sweep() -> None:
+    samples = [
+        CalibrationSample(z_um=-1.0, error=-0.5),
+        CalibrationSample(z_um=0.0, error=0.0),
+        CalibrationSample(z_um=1.0, error=0.5),
+    ]
+    report = fit_linear_calibration_with_report(samples, robust=True)
+
+    assert calibration_quality_issues(samples, report) == []

@@ -275,3 +275,48 @@ def test_autofocus_worker_stop_nonblocking() -> None:
     # allow thread to observe stop event
     time.sleep(0.01)
     camera.stop()
+
+
+def test_controller_limits_absolute_excursion_around_initial_lock() -> None:
+    stage = MclNanoZStage()
+    stage.move_z_um(10.0)
+    camera = SimulatedCamera(stage=stage, scene=SimulatedScene(focal_plane_um=0.0, alpha_px_per_um=0.25))
+    camera.start()
+
+    config = AutofocusConfig(
+        roi=Roi(x=20, y=20, width=24, height=24),
+        kp=1.0,
+        ki=0.0,
+        max_step_um=10.0,
+        max_abs_excursion_um=1.0,
+    )
+    controller = AstigmaticAutofocusController(
+        camera=camera,
+        stage=stage,
+        config=config,
+        calibration=FocusCalibration(error_at_focus=0.0, error_to_um=10.0),
+    )
+
+    sample = controller.run_step(dt_s=0.01)
+    camera.stop()
+
+    assert 9.0 <= sample.commanded_z_um <= 11.0
+
+
+def test_controller_rejects_negative_max_abs_excursion() -> None:
+    stage = MclNanoZStage()
+    camera = SimulatedCamera(stage=stage)
+    camera.start()
+
+    with pytest.raises(ValueError, match="max_abs_excursion_um"):
+        AstigmaticAutofocusController(
+            camera=camera,
+            stage=stage,
+            config=AutofocusConfig(
+                roi=Roi(x=20, y=20, width=24, height=24),
+                max_abs_excursion_um=-0.1,
+            ),
+            calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
+        )
+
+    camera.stop()

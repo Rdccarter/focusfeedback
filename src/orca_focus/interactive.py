@@ -14,6 +14,7 @@ from .autofocus import (
 from .calibration import (
     FocusCalibration,
     auto_calibrate,
+    calibration_quality_issues,
     fit_linear_calibration_with_report,
     save_calibration_samples_csv,
 )
@@ -147,6 +148,7 @@ def launch_autofocus_viewer(
             integral_limit_um=default_config.integral_limit_um,
             stage_min_um=default_config.stage_min_um,
             stage_max_um=default_config.stage_max_um,
+            max_abs_excursion_um=default_config.max_abs_excursion_um,
             min_roi_intensity=default_config.min_roi_intensity,
             error_alpha=default_config.error_alpha,
             edge_margin_px=default_config.edge_margin_px,
@@ -222,6 +224,12 @@ def launch_autofocus_viewer(
             save_calibration_samples_csv(out_path, samples)
 
             report = fit_linear_calibration_with_report(samples, robust=True)
+            issues = calibration_quality_issues(samples, report)
+            if issues:
+                raise RuntimeError(
+                    " ; ".join(["Calibration quality check failed"] + issues)
+                )
+
             current_calibration = report.calibration
             state["calibration_message"] = (
                 "Calibration complete: "

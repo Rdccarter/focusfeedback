@@ -287,6 +287,61 @@ def load_calibration_samples_csv(path: str | Path) -> list[CalibrationSample]:
     return out
 
 
+def _pearson_corr(xs: list[float], ys: list[float]) -> float:
+    if len(xs) != len(ys) or len(xs) < 2:
+        return 0.0
+    x_mean = sum(xs) / len(xs)
+    y_mean = sum(ys) / len(ys)
+    var_x = sum((x - x_mean) ** 2 for x in xs)
+    var_y = sum((y - y_mean) ** 2 for y in ys)
+    if var_x <= 0.0 or var_y <= 0.0:
+        return 0.0
+    cov = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
+    return cov / ((var_x * var_y) ** 0.5)
+
+
+def calibration_quality_issues(
+    samples: list[CalibrationSample],
+    report: CalibrationFitReport,
+    *,
+    min_abs_corr: float = 0.85,
+    min_error_span: float = 0.03,
+    focus_margin_fraction: float = 0.1,
+) -> list[str]:
+    """Return human-readable issues when a sweep is not safely usable for control."""
+
+    if len(samples) < 2:
+        return ["need at least 2 samples"]
+
+    errors = [s.error for s in samples]
+    z_vals = [s.z_um for s in samples]
+    min_err = min(errors)
+    max_err = max(errors)
+    err_span = max_err - min_err
+
+    issues: list[str] = []
+
+    if err_span < min_error_span:
+        issues.append(
+            f"error span too small ({err_span:0.4f}); increase Z range or improve ROI SNR"
+        )
+
+    abs_corr = abs(_pearson_corr(z_vals, errors))
+    if abs_corr < min_abs_corr:
+        issues.append(
+            f"error-vs-Z is not monotonic/linear enough (|corr|={abs_corr:0.3f}); use a smaller local Z range"
+        )
+
+    margin = max(1e-9, err_span * focus_margin_fraction)
+    err0 = report.calibration.error_at_focus
+    if err0 < (min_err - margin) or err0 > (max_err + margin):
+        issues.append(
+            "fitted focus lies outside sampled error range; sweep likely does not bracket focus"
+        )
+
+    return issues
+
+
 def validate_calibration_sign(
     calibration: FocusCalibration,
     *,
