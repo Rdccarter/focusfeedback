@@ -18,7 +18,7 @@ from .calibration import (
     fit_linear_calibration_with_report,
     save_calibration_samples_csv,
 )
-from .focus_metric import Roi
+from .focus_metric import Roi, astigmatic_error_signal
 from .interfaces import CameraInterface, StageInterface
 
 
@@ -405,6 +405,7 @@ def launch_autofocus_viewer(
         viewer_ref.close()
 
     viewer.window._orca_focus_timer = timer  # type: ignore[attr-defined]
+    viewer.window._orca_focus_roi_timer = roi_apply_timer  # type: ignore[attr-defined]
     napari.run()
     _stop_worker()
 
@@ -436,6 +437,7 @@ def launch_napari_viewer(camera: CameraInterface, interval_ms: int = 20) -> None
     timer.start(max(1, int(interval_ms)))
 
     viewer.window._orca_focus_timer = timer  # type: ignore[attr-defined]
+    viewer.window._orca_focus_roi_timer = roi_apply_timer  # type: ignore[attr-defined]
     napari.run()
 
 
