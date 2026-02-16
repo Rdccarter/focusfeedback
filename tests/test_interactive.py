@@ -121,35 +121,15 @@ def test_calibration_plan_from_nm_computes_expected_bounds_and_steps() -> None:
     assert effective_step_nm == pytest.approx(100.0)
 
 
-def test_build_runtime_calibration_for_roi_anchors_error_offset(monkeypatch):
+
+
+def test_build_runtime_calibration_forces_zero_error_target() -> None:
     from orca_focus.calibration import FocusCalibration
-    from orca_focus.focus_metric import Roi
 
-    camera = _FakeCamera()
-    roi = Roi(x=0, y=0, width=2, height=2)
-    base = FocusCalibration(error_at_focus=0.0, error_to_um=3.0)
+    base = FocusCalibration(error_at_focus=0.123, error_to_um=3.0)
 
-    monkeypatch.setattr(interactive, "astigmatic_error_signal", lambda _img, _roi: 0.125)
-
-    cal = interactive._build_runtime_calibration_for_roi(camera, roi, base)
+    cal = interactive._build_runtime_calibration(base)
 
     assert cal.error_to_um == pytest.approx(3.0)
-    assert cal.error_at_focus == pytest.approx(0.125)
+    assert cal.error_at_focus == pytest.approx(0.0)
 
-
-def test_build_runtime_calibration_for_roi_falls_back_on_error(monkeypatch):
-    from orca_focus.calibration import FocusCalibration
-    from orca_focus.focus_metric import Roi
-
-    camera = _FakeCamera()
-    roi = Roi(x=0, y=0, width=2, height=2)
-    base = FocusCalibration(error_at_focus=0.05, error_to_um=2.0)
-
-    def _boom(_img, _roi):
-        raise RuntimeError("metric failed")
-
-    monkeypatch.setattr(interactive, "astigmatic_error_signal", _boom)
-
-    cal = interactive._build_runtime_calibration_for_roi(camera, roi, base)
-
-    assert cal is base

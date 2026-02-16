@@ -78,7 +78,7 @@ orca-focus --camera andor --stage mcl --stage-wrapper MCL_Madlib_Wrapper --show-
 5. Click **Run Calibration Sweep** (or press `c`) to calibrate.
 6. Click the same button while running (**Stop Calibration Sweep**) to cancel.
 7. Status text shows current error, measured Z, command Z, intensity, and calibration progress.
-- When you re-draw/move ROI to a different bead in the live viewer, autofocus re-anchors the error offset for that ROI while keeping calibration slope, reducing sudden jumps/out-of-focus moves after target changes.
+- When you re-draw/move ROI to a different bead, autofocus keeps the calibrated slope but still targets error = 0 (no single-frame re-anchoring), preventing lock-on to a defocused snapshot.
 
 Example status line:
 
