@@ -18,6 +18,7 @@ def test_build_parser_defaults() -> None:
     assert args.stage_min_um is None
     assert args.stage_max_um is None
     assert args.af_max_excursion_um == 5.0
+    assert args.command_deadband_um == 0.02
 
 
 def test_build_parser_stage_accepts_micromanager() -> None:
@@ -225,3 +226,27 @@ def test_main_maps_negative_af_max_excursion_to_none(tmp_path: Path) -> None:
 
     config = ctrl_cls.call_args.kwargs["config"]
     assert config.max_abs_excursion_um is None
+    assert config.command_deadband_um == 0.02
+
+
+def test_main_forwards_command_deadband(tmp_path: Path) -> None:
+    csv_path = tmp_path / "calibration_sweep.csv"
+    csv_path.write_text("z_um,error,weight\n-1.0,-0.5,1\n0.0,0.0,1\n1.0,0.5,1\n", encoding="utf-8")
+
+    with patch(
+        "sys.argv",
+        [
+            "orca-focus",
+            "--duration",
+            "0.01",
+            "--command-deadband-um",
+            "0.05",
+            "--calibration-csv",
+            str(csv_path),
+        ],
+    ), patch("orca_focus.cli.AstigmaticAutofocusController") as ctrl_cls:
+        ctrl_cls.return_value.run.return_value = []
+        assert main() == 0
+
+    config = ctrl_cls.call_args.kwargs["config"]
+    assert config.command_deadband_um == 0.05

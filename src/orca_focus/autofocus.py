@@ -31,6 +31,9 @@ class AutofocusConfig:
     # Reject frames when PSF centroid is within this many pixels of the ROI
     # boundary, to avoid biased second moments from a truncated PSF.
     edge_margin_px: float = 0.0
+    # Do not issue stage moves smaller than this threshold (um) to reduce
+    # high-frequency dithering/oscillation near focus.
+    command_deadband_um: float = 0.02
 
 
 @dataclass(slots=True)
@@ -96,6 +99,8 @@ class AstigmaticAutofocusController:
             raise ValueError("edge_margin_px must be >= 0")
         if self._config.max_abs_excursion_um is not None and self._config.max_abs_excursion_um < 0:
             raise ValueError("max_abs_excursion_um must be >= 0 when provided")
+        if self._config.command_deadband_um < 0:
+            raise ValueError("command_deadband_um must be >= 0")
 
     def _apply_limits(self, target_z_um: float) -> float:
         if self._z_lock_center_um is not None and self._config.max_abs_excursion_um is not None:
@@ -176,6 +181,24 @@ class AstigmaticAutofocusController:
 
         correction = -(self._config.kp * error_um + self._config.ki * self._integral_um)
         correction = max(-self._config.max_step_um, min(self._config.max_step_um, correction))
+
+        if abs(correction) <= self._config.command_deadband_um:
+            # Anti-chatter: ignore tiny corrections that mostly reflect metric
+            # noise near lock and undo this step's integral accumulation.
+            self._integral_um -= error_um * dt_s
+            self._integral_um = max(
+                -self._config.integral_limit_um,
+                min(self._config.integral_limit_um, self._integral_um),
+            )
+            return AutofocusSample(
+                timestamp_s=frame.timestamp_s,
+                error=error,
+                error_um=error_um,
+                stage_z_um=current_z,
+                commanded_z_um=current_z,
+                roi_total_intensity=total_intensity,
+                control_applied=False,
+            )
 
         raw_target = current_z + correction
         commanded_z = self._apply_limits(raw_target)

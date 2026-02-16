@@ -63,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kp", type=float, default=0.8, help="Proportional gain")
     parser.add_argument("--ki", type=float, default=0.2, help="Integral gain")
     parser.add_argument("--max-step", type=float, default=0.2, help="Max correction step in µm")
+    parser.add_argument("--command-deadband-um", type=float, default=0.02, help="Ignore stage corrections smaller than this magnitude (µm) to reduce oscillation")
     parser.add_argument("--stage-min-um", type=float, default=None, help="Lower clamp for commanded stage Z (µm)")
     parser.add_argument("--stage-max-um", type=float, default=None, help="Upper clamp for commanded stage Z (µm)")
     parser.add_argument("--af-max-excursion-um", type=float, default=5.0, help="Max allowed autofocus excursion from initial Z lock point (µm); set negative to disable")
@@ -231,6 +232,7 @@ def main() -> int:
             stage_min_um=args.stage_min_um,
             stage_max_um=args.stage_max_um,
             max_abs_excursion_um=(None if args.af_max_excursion_um < 0 else args.af_max_excursion_um),
+            command_deadband_um=args.command_deadband_um,
         )
         try:
             calibration = _load_startup_calibration(args.calibration_csv)

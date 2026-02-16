@@ -151,6 +151,7 @@ orca-focus [OPTIONS]
 | `--kp` | `0.8` | Proportional gain |
 | `--ki` | `0.2` | Integral gain |
 | `--max-step` | `0.2` | Max per-step Z command (um) |
+| `--command-deadband-um` | `0.02` | Ignore tiny stage commands below this size (um) to reduce Z dithering near lock |
 | `--stage-min-um` | none | Hard lower clamp for commanded stage Z (um) |
 | `--stage-max-um` | none | Hard upper clamp for commanded stage Z (um) |
 | `--af-max-excursion-um` | `5.0` | Max autofocus excursion from initial lock Z (um); set negative to disable this clamp |
@@ -168,6 +169,7 @@ orca-focus [OPTIONS]
   - Re-run calibration with a smaller half-range and a stable, centered ROI bead.
   - Confirm the error trend is roughly monotonic over the sweep; avoid very wide sweeps that include non-linear regions.
   - Set hard limits with `--stage-min-um/--stage-max-um` (or lower `--af-max-excursion-um`) to prevent large absolute Z jumps.
+  - If Z chatters around focus, increase `--command-deadband-um` (for example to `0.03`–`0.08`).
   - Status `-6` from `MCL_SingleWriteN` usually indicates out-of-range/invalid moves; verify stage axis and clamp settings.
 - **Displayed Z looks off**
   - The viewer now displays `z(now)` from live stage readback when available.

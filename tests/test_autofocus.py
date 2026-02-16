@@ -230,14 +230,17 @@ def test_controller_skips_duplicate_frames() -> None:
         calibration=FocusCalibration(error_at_focus=0.0, error_to_um=2.8),
     )
 
-    s1 = controller.run_step()
-    assert s1.control_applied is True  # first frame is always fresh
+    from unittest.mock import patch
 
-    s2 = controller.run_step()
-    assert s2.control_applied is False  # duplicate timestamp → skipped
+    with patch("orca_focus.autofocus.astigmatic_error_signal", return_value=0.2):
+        s1 = controller.run_step()
+        assert s1.control_applied is True  # first frame is always fresh
 
-    s3 = controller.run_step()
-    assert s3.control_applied is True  # new timestamp → processed
+        s2 = controller.run_step()
+        assert s2.control_applied is False  # duplicate timestamp → skipped
+
+        s3 = controller.run_step()
+        assert s3.control_applied is True  # new timestamp → processed
 
 
 def test_controller_rejects_invalid_loop_hz() -> None:
@@ -320,3 +323,45 @@ def test_controller_rejects_negative_max_abs_excursion() -> None:
         )
 
     camera.stop()
+
+
+def test_controller_command_deadband_suppresses_small_moves() -> None:
+    class _Cam:
+        def get_frame(self) -> CameraFrame:
+            return CameraFrame(image=[[1.0] * 64 for _ in range(64)], timestamp_s=1.0)
+
+    class _Stage:
+        def __init__(self) -> None:
+            self.z = 2.0
+            self.moves: list[float] = []
+
+        def get_z_um(self) -> float:
+            return self.z
+
+        def move_z_um(self, z: float) -> None:
+            self.moves.append(z)
+            self.z = z
+
+    stage = _Stage()
+    camera = _Cam()
+    controller = AstigmaticAutofocusController(
+        camera=camera,
+        stage=stage,
+        config=AutofocusConfig(
+            roi=Roi(x=20, y=20, width=24, height=24),
+            kp=1.0,
+            ki=0.0,
+            command_deadband_um=0.05,
+            max_step_um=1.0,
+        ),
+        calibration=FocusCalibration(error_at_focus=0.0, error_to_um=1.0),
+    )
+
+    from unittest.mock import patch
+
+    with patch("orca_focus.autofocus.astigmatic_error_signal", return_value=0.02):
+        sample = controller.run_step(dt_s=0.01)
+
+    assert sample.control_applied is False
+    assert sample.commanded_z_um == pytest.approx(2.0)
+    assert stage.moves == []
